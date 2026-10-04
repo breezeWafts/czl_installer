@@ -1,0 +1,183 @@
+{
+  "localBaseDir": "D:/c_temp",
+  "servers": [
+    {
+      "name": "ftp1-主用",
+      "type": "ftp",
+      "host": "192.168.1.100",
+      "port": 21,
+      "username": "anonymous",
+      "password": "",
+      "basePath": "/packages/",
+      "connectTimeout": 5000
+    },
+    {
+      "name": "ftp2-备用",
+      "type": "ftp",
+      "host": "192.168.1.101",
+      "port": 21,
+      "username": "anonymous",
+      "password": "",
+      "basePath": "/packages/",
+      "connectTimeout": 5000
+    }
+  ],
+  "bookmarks": [
+      { "name": "公司官网",   "url": "https://www.example.com" },
+      { "name": "内网 OA",    "url": "http://oa.example.com" },
+      { "name": "邮件系统",   "url": "https://mail.example.com" },
+      { "name": "文件服务器", "url": "http://file.example.com" }
+    ],
+  "categories": [
+    {
+      "id": "cat_office",
+      "name": "办公软件",
+      "children": [
+        {
+          "id": "sub_wps",
+          "name": "WPS 系列",
+          "items": [
+            {
+              "id": "item_wps_office",
+              "name": "WPS Office 2023",
+              "type": "msi",
+              "remotePath": "office/wps_office_2023.msi",
+              "localTempPath": "office/wps_office_2023.msi",
+              "installArgs": "/quiet",
+              "description": "WPS Office 2023 专业版，包含文字、表格、演示",
+              "version": "2023.1.0",
+              "publisher": "金山办公",
+              "killServices": ["WPSUpdateService", "WPSCloudSvr"],
+              "killProcesses": ["wps.exe", "et.exe", "wpp.exe",
+                                "wpscloudsvr.exe", "wpscenter.exe"]
+            }
+          ]
+        },
+        {
+          "id": "sub_office",
+          "name": "Microsoft Office",
+          "items": [
+            {
+              "id": "item_office_2019",
+              "name": "Office 2019 Pro Plus",
+              "type": "exe",
+              "remotePath": "office/office2019_setup.exe",
+              "localTempPath": "office/office2019_setup.exe",
+              "installArgs": "/configure config.xml",
+              "description": "Microsoft Office 2019 专业增强版",
+              "version": "2019",
+              "publisher": "Microsoft",
+              "killServices": ["ClickToRunSvc"],
+              "killProcesses": ["WINWORD.EXE", "EXCEL.EXE", "POWERPNT.EXE"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cat_runtime",
+      "name": "运行库与驱动",
+      "items": [
+        {
+          "id": "item_vcredist",
+          "name": "VC++ 运行库合集",
+          "type": "bat",
+          "remotePath": "driver/vcredist_all.bat",
+          "localTempPath": "driver/vcredist_all.bat",
+          "description": "VC++ 2005-2022 全部运行库",
+          "version": "2024",
+          "publisher": "Microsoft",
+          "killServices": [],
+          "killProcesses": []
+        }
+      ]
+    },
+    {
+      "id": "cat_deploy",
+      "name": "资源与配置部署",
+      "items": [
+        {
+          "id": "item_copy_files",
+          "name": "部署业务配置文件",
+          "type": "copy_only",
+          "description": "复制多个配置文件到目标程序目录并覆盖",
+          "version": "1.0",
+          "publisher": "内部",
+          "targetPath": "C:/Program Files/MyApp/config/",
+          "overwrite": true,
+          "sources": [
+            {
+              "kind": "file",
+              "remotePath": "cfg/app.ini",
+              "localPath": "cfg/app.ini",
+              "targetPath": "C:/Program Files/MyApp/config/app.ini"
+            },
+            {
+              "kind": "file",
+              "remotePath": "cfg/langs.json",
+              "localPath": "cfg/langs.json",
+              "targetPath": "C:/Program Files/MyApp/config/langs.json"
+            }
+          ],
+          "killServices": [],
+          "killProcesses": ["MyApp.exe"]
+        },
+        {
+          "id": "item_deploy_plugin",
+          "name": "部署插件目录并解压资源包",
+          "type": "copy_only",
+          "description": "复制插件目录，并解压资源 ZIP 到目标位置",
+          "version": "2.0",
+          "publisher": "内部",
+          "overwrite": true,
+          "sources": [
+            {
+              "kind": "dir",
+              "remotePath": "plugin/",
+              "localPath": "plugin/",
+              "files": ["myplugin.dll", "plugin.xml", "readme.txt"],
+              "targetPath": "C:/Program Files/MyApp/plugins/"
+            },
+            {
+              "kind": "zip",
+              "remotePath": "res/extras.zip",
+              "localPath": "res/extras.zip",
+              "targetPath": "C:/Program Files/MyApp/extras/"
+            }
+          ],
+          "killServices": [],
+          "killProcesses": ["MyApp.exe", "MyAppTray.exe"]
+        },
+        {
+          "id": "item_plugin_register",
+          "name": "安装插件并注册组件",
+          "type": "copy_and_register",
+          "description": "复制插件与资源包，并以 TrustedInstaller 权限执行注册命令",
+          "version": "2.1",
+          "publisher": "内部",
+          "overwrite": true,
+          "sources": [
+            {
+              "kind": "file",
+              "remotePath": "plugin/myplugin.dll",
+              "localPath": "plugin/myplugin.dll",
+              "targetPath": "C:/Program Files/MyApp/plugins/myplugin.dll"
+            },
+            {
+              "kind": "zip",
+              "remotePath": "plugin/resources.zip",
+              "localPath": "plugin/resources.zip",
+              "targetPath": "C:/Program Files/MyApp/plugins/resources/"
+            }
+          ],
+          "registerCommands": [
+            "regsvr32 /s \"C:\\Program Files\\MyApp\\plugins\\myplugin.dll\"",
+            "reg add \"HKLM\\SOFTWARE\\MyApp\\Plugins\" /v MyPlugin /t REG_SZ /d \"2.1\" /f"
+          ],
+          "killServices": ["MyAppService"],
+          "killProcesses": ["MyApp.exe", "MyAppTray.exe"]
+        }
+      ]
+    }
+  ]
+}

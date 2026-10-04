@@ -1,0 +1,28 @@
+{
+  "localBaseDir": "D:/c_temp",
+  "servers": [
+    {
+      "name": "http1-主用",
+      "type": "http",
+      "baseUrl": "http://192.168.1.100:8080/packages/",
+      "username": "install_user",
+      "password": "secure_password_123",
+      "connectTimeout": 5000
+    },
+    {
+      "name": "http2-备用",
+      "type": "http",
+      "baseUrl": "http://192.168.1.101:8080/packages/",
+      "username": "install_user",
+      "password": "secure_password_123",
+      "connectTimeout": 5000
+    }
+  ],
+  "bookmarks": [
+      { "name": "公司官网",   "url": "https://www.example.com" },
+      { "name": "内网 OA",    "url": "http://oa.example.com" },
+      { "name": "邮件系统",   "url": "https://mail.example.com" },
+      { "name": "文件服务器", "url": "http://file.example.com" }
+    ],
+  "categories": [ "... 与 config_ftp.json 完全相同的 categories 内容 ..." ]
+}
