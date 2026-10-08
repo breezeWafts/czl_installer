@@ -63,7 +63,7 @@
               "type": "exe",
               "remotePath": "office/office2019_setup.exe",
               "localTempPath": "office/office2019_setup.exe",
-              "installArgs": "/configure config.xml",
+              "installArgs": ["/configure", "config.xml"],
               "description": "Microsoft Office 2019 专业增强版",
               "version": "2019",
               "publisher": "Microsoft",

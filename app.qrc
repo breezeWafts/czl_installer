@@ -1,0 +1,10 @@
+<!--
+  仅嵌入窗口图标用的 PNG。
+  可执行文件本身的图标走 app.rc 的 RT_GROUP_ICON，
+  这里只是为了在没有外部图标文件时也能设置窗口/任务栏图标。
+-->
+<RCC>
+    <qresource prefix="/icons">
+        <file alias="app.png">app.png</file>
+    </qresource>
+</RCC>

@@ -1,103 +1,159 @@
 #include "InstallItemModel.h"
 
-InstallItemModel::InstallItemModel(QObject *parent) : QAbstractListModel(parent) {}
+InstallItemModel::InstallItemModel(QObject *parent)
+    : QAbstractListModel(parent)
+{
+}
 
-int InstallItemModel::rowCount(const QModelIndex &) const { return m_rows.size(); }
+int InstallItemModel::rowCount(const QModelIndex &parent) const
+{
+    if (parent.isValid())
+        return 0;
+    return static_cast<int>(m_rows.size());
+}
 
 QVariant InstallItemModel::data(const QModelIndex &index, int role) const
 {
-    if (!index.isValid() || index.row() >= m_rows.size()) return QVariant();
-    const Row &r = m_rows[index.row()];
+    if (!index.isValid() || index.row() < 0 || index.row() >= m_rows.size())
+        return {};
+
+    const Row &row = m_rows.at(index.row());
+
     switch (role) {
-    case NameRole:          return r.name;
-    case VersionRole:       return r.version;
-    case PublisherRole:     return r.publisher;
-    case DescriptionRole:   return r.description;
-    case TypeRole:          return r.type;
-    case ItemIdRole:        return r.itemId;
-    case InstallStatusRole: return r.installStatus;
-    default:                return QVariant();
+    case Qt::DisplayRole:
+    case NameRole:
+        return row.name;
+    case VersionRole:
+        return row.version;
+    case PublisherRole:
+        return row.publisher;
+    case DescriptionRole:
+        return row.description;
+    case TypeRole:
+        return row.type;
+    case ItemIdRole:
+        return row.itemId;
+    case InstallStatusRole:
+        // 状态存在 m_status 里，而不是行结构体里 —— 这样刷新列表也不丢状态。
+        return m_status.value(row.itemId, QString::fromLatin1(kStatusIdle));
+    default:
+        return {};
     }
 }
 
 QHash<int, QByteArray> InstallItemModel::roleNames() const
 {
-    QHash<int, QByteArray> roles;
-    roles[NameRole]          = "name";
-    roles[VersionRole]       = "version";
-    roles[PublisherRole]     = "publisher";
-    roles[DescriptionRole]   = "description";
-    roles[TypeRole]          = "type";
-    roles[ItemIdRole]        = "itemId";
-    roles[InstallStatusRole] = "installStatus";
+    QHash<int, QByteArray> roles = QAbstractListModel::roleNames();
+    roles[NameRole]          = QByteArrayLiteral("name");
+    roles[VersionRole]       = QByteArrayLiteral("version");
+    roles[PublisherRole]     = QByteArrayLiteral("publisher");
+    roles[DescriptionRole]   = QByteArrayLiteral("description");
+    roles[TypeRole]          = QByteArrayLiteral("type");
+    roles[ItemIdRole]        = QByteArrayLiteral("itemId");
+    roles[InstallStatusRole] = QByteArrayLiteral("installStatus");
     return roles;
 }
 
-void InstallItemModel::addItem(const InstallItem &it)
+void InstallItemModel::addItem(const InstallItem &item)
 {
-    Row r;
-    r.name          = it.name;
-    r.version       = it.version;
-    r.publisher     = it.publisher;
-    r.description   = it.description;
-    r.type          = it.type;
-    r.itemId        = it.id;
-    r.installStatus = "idle";
-    m_rows.append(r);
+    Row row;
+    row.name        = item.name;
+    row.version     = item.version;
+    row.publisher   = item.publisher;
+    row.description = item.description;
+    row.type        = item.type;
+    row.itemId      = item.id;
+
+    m_rows.append(row);
+    m_items.append(item);
+
+    // 首次见到该项目时初始化状态，已存在的状态原样保留。
+    if (!m_status.contains(item.id))
+        m_status.insert(item.id, QString::fromLatin1(kStatusIdle));
 }
 
-void InstallItemModel::appendItemsFromCategory(const Category &cat)
+void InstallItemModel::appendItemsFromCategory(const Category &category)
 {
-    for (const auto &it : cat.items) addItem(it);
-    for (const auto &child : cat.children) appendItemsFromCategory(child);
+    for (const InstallItem &item : category.items)
+        addItem(item);
+    for (const Category &child : category.children)
+        appendItemsFromCategory(child);
+}
+
+void InstallItemModel::rebuild()
+{
+    beginResetModel();
+    m_rows.clear();
+    m_items.clear();
+
+    if (m_config == nullptr) {
+        endResetModel();
+        return;
+    }
+
+    if (m_categoryId.isEmpty()) {
+        // 「全部」：遍历整棵类别树
+        for (const Category &category : m_config->categories())
+            appendItemsFromCategory(category);
+    } else {
+        // 指定类别：包含它自己以及所有后代的安装项。
+        // 旧实现只取 cat.items 与 children，行为基本一致但没有做去重，
+        // 这里改用递归收集，语义更清晰。
+        Category root;
+        if (m_config->findCategory(m_categoryId, root)) {
+            for (const InstallItem &item : root.items)
+                addItem(item);
+            for (const Category &child : root.children)
+                appendItemsFromCategory(child);
+        }
+    }
+
+    endResetModel();
 }
 
 void InstallItemModel::loadAll()
 {
-    if (!m_config) return;
-    beginResetModel();
-    m_rows.clear();
-    for (const auto &cat : m_config->categories())
-        appendItemsFromCategory(cat);
-    endResetModel();
-}
-
-bool InstallItemModel::findCategory(const QString &id, Category &out) const
-{
-    if (!m_config) return false;
-    std::function<bool(const QList<Category>&)> walk =
-        [&](const QList<Category> &cats) -> bool {
-        for (const auto &c : cats) {
-            if (c.id == id) { out = c; return true; }
-            if (walk(c.children)) return true;
-        }
-        return false;
-    };
-    return walk(m_config->categories());
+    m_categoryId.clear();
+    rebuild();
 }
 
 void InstallItemModel::filterByCategory(const QString &categoryId)
 {
-    if (!m_config) return;
-    beginResetModel();
-    m_rows.clear();
-
-    Category cat;
-    if (findCategory(categoryId, cat)) {
-        for (const auto &it : cat.items) addItem(it);
-        for (const auto &child : cat.children) appendItemsFromCategory(child);
-    }
-    endResetModel();
+    m_categoryId = categoryId;
+    rebuild();
 }
 
 void InstallItemModel::setStatus(const QString &itemId, const QString &status)
 {
-    for (int i = 0; i < m_rows.size(); ++i) {
-        if (m_rows[i].itemId == itemId) {
-            m_rows[i].installStatus = status;
-            QModelIndex idx = index(i, 0);
-            emit dataChanged(idx, idx, {InstallStatusRole});
-            return;
-        }
+    if (itemId.isEmpty())
+        return;
+
+    const QString previous = m_status.value(itemId);
+    if (previous == status)
+        return;
+
+    m_status.insert(itemId, status);
+
+    // 只有当前列表里存在该项时才需要发信号
+    for (int row = 0; row < m_rows.size(); ++row) {
+        if (m_rows.at(row).itemId != itemId)
+            continue;
+
+        const QModelIndex modelIndex = index(row, 0);
+        emit dataChanged(modelIndex, modelIndex, {InstallStatusRole});
+        break;
     }
+}
+
+QString InstallItemModel::statusOf(const QString &itemId) const
+{
+    return m_status.value(itemId, QString::fromLatin1(kStatusIdle));
+}
+
+bool InstallItemModel::itemAt(int row, InstallItem &out) const
+{
+    if (row < 0 || row >= m_items.size())
+        return false;
+    out = m_items.at(row);
+    return true;
 }

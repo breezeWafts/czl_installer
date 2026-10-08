@@ -1,330 +1,420 @@
 #include "BookmarkManager.h"
 
-#include <QCoreApplication>
+#include "Logger.h"
+#include "ProcessManager.h"
+
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QProcess>
-#include <QSet>
 #include <QThread>
 #include <QUuid>
-#include <QDebug>
 
-BookmarkManager::BookmarkManager(QObject *parent) : QObject(parent) {}
+// ===========================================================================
+// 浏览器候选
+// ===========================================================================
+namespace {
 
-// ============================================================
-// 检测安装的浏览器
-// ============================================================
+/// 一个浏览器产品的静态描述。
+struct BrowserProduct {
+    const char *key;
+    const char *displayName;
+    const char *processName;
+    const char *relativePath;   ///< 相对 LOCALAPPDATA 的 User Data 目录
+};
+
+/// 唯一一份候选列表（旧版在 detectBrowsers 与 applyToAll 里各写了一份）。
+const BrowserProduct kProducts[] = {
+    { "chrome",  "Chrome",    "chrome.exe",
+      "/Google/Chrome/User Data" },
+    { "edge",    "Edge",      "msedge.exe",
+      "/Microsoft/Edge/User Data" },
+    { "brave",   "Brave",     "brave.exe",
+      "/BraveSoftware/Brave-Browser/User Data" },
+    { "vivaldi", "Vivaldi",   "vivaldi.exe",
+      "/Vivaldi/User Data" },
+    { "opera",   "Opera",     "opera.exe",
+      "/Programs/Opera/User Data" },
+    { "360",     "360Chrome", "360chrome.exe",
+      "/360Chrome/Chrome/User Data" },
+    { "qq",      "QQBrowser", "QQBrowser.exe",
+      "/Tencent/QQBrowser/User Data" },
+};
+
+/// 在 User Data 下找出所有含 Bookmarks 文件的配置目录。
+QStringList bookmarkFilesIn(const QString &userDataDir)
+{
+    QStringList result;
+
+    const QString defaultFile = userDataDir + QStringLiteral("/Default/Bookmarks");
+    if (QFile::exists(defaultFile))
+        result << defaultFile;
+
+    const QDir dir(userDataDir);
+    if (!dir.exists())
+        return result;
+
+    // Profile 1 / Profile 2 ...（Chromium 的多用户配置目录命名）
+    const QStringList entries =
+        dir.entryList(QStringList{QStringLiteral("Profile *")}, QDir::Dirs);
+    for (const QString &entry : entries) {
+        const QString candidate =
+            userDataDir + QLatin1Char('/') + entry + QStringLiteral("/Bookmarks");
+        if (QFile::exists(candidate))
+            result << candidate;
+    }
+
+    result.removeDuplicates();
+    return result;
+}
+
+} // namespace
+
+BookmarkManager::BookmarkManager(QObject *parent)
+    : QObject(parent)
+{
+}
+
+QString BookmarkManager::localAppData()
+{
+    return qEnvironmentVariable("LOCALAPPDATA");
+}
+
+QList<BookmarkManager::BrowserTarget> BookmarkManager::buildTargets()
+{
+    QList<BrowserTarget> targets;
+
+    const QString lad = localAppData();
+    if (lad.isEmpty())
+        return targets;
+
+    for (const BrowserProduct &product : kProducts) {
+        const QString userData =
+            QDir::toNativeSeparators(lad + QString::fromLatin1(product.relativePath));
+
+        const QStringList files = bookmarkFilesIn(userData);
+        for (const QString &file : files) {
+            BrowserTarget target;
+            target.key           = QString::fromLatin1(product.key);
+            target.displayName   = QString::fromLatin1(product.displayName);
+            target.processName   = QString::fromLatin1(product.processName);
+            target.bookmarksPath = file;
+            targets.append(target);
+        }
+    }
+
+    return targets;
+}
+
 QStringList BookmarkManager::detectBrowsers()
 {
-    QString lad = QString::fromLocal8Bit(qgetenv("LOCALAPPDATA"));
-    if (lad.isEmpty()) return {};
-
-    struct Candidate {
-        const char *name;
-        const char *relative;   // 相对 LOCALAPPDATA 的路径
-    };
-
-    static const Candidate kCandidates[] = {
-        { "Chrome",    "/Google/Chrome/User Data/Default/Bookmarks" },
-        { "Edge",      "/Microsoft/Edge/User Data/Default/Bookmarks" },
-        { "Brave",     "/BraveSoftware/Brave-Browser/User Data/Default/Bookmarks" },
-        { "Vivaldi",   "/Vivaldi/User Data/Default/Bookmarks" },
-        { "Opera",     "/Programs/Opera/User Data/Default/Bookmarks" },
-        { "360Chrome", "/360Chrome/Chrome/User Data/Default/Bookmarks" },
-        { "QQBrowser", "/Tencent/QQBrowser/User Data/Default/Bookmarks" },
-    };
-
     QStringList found;
-    for (const auto &c : kCandidates) {
-        QString path = lad + QString::fromLatin1(c.relative);
-        if (QFile::exists(path))
-            found << QString::fromLatin1(c.name);
+    const QList<BrowserTarget> targets = buildTargets();
+    for (const BrowserTarget &target : targets) {
+        if (!found.contains(target.displayName))
+            found << target.displayName;
     }
     return found;
 }
 
-// ============================================================
-// 对所有浏览器应用书签
-// ============================================================
+// ===========================================================================
+// 批量应用
+// ===========================================================================
 BookmarkManager::Result BookmarkManager::applyToAll(const QList<BookmarkItem> &items)
 {
     Result total;
 
     if (items.isEmpty()) {
-        total.message = "配置文件中没有书签，跳过";
+        total.message = QStringLiteral("配置文件中没有书签，跳过");
         return total;
     }
 
-    QString lad = QString::fromLocal8Bit(qgetenv("LOCALAPPDATA"));
-    if (lad.isEmpty()) {
-        total.message = "无法获取 LOCALAPPDATA 路径";
+    const QList<BrowserTarget> targets = buildTargets();
+    if (targets.isEmpty()) {
+        total.message = QStringLiteral("未检测到任何受支持的浏览器");
         return total;
     }
 
-    // 构造浏览器候选（key、显示名、进程名、书签文件路径）
-    QList<BrowserTarget> targets = {
-        { "chrome",  "Chrome",  "chrome.exe",
-          lad + "/Google/Chrome/User Data/Default/Bookmarks" },
-        { "edge",    "Edge",    "msedge.exe",
-          lad + "/Microsoft/Edge/User Data/Default/Bookmarks" },
-        { "brave",   "Brave",   "brave.exe",
-          lad + "/BraveSoftware/Brave-Browser/User Data/Default/Bookmarks" },
-        { "vivaldi", "Vivaldi", "vivaldi.exe",
-          lad + "/Vivaldi/User Data/Default/Bookmarks" },
-        { "opera",   "Opera",   "opera.exe",
-          lad + "/Programs/Opera/User Data/Default/Bookmarks" },
-        { "360",     "360Chrome", "360chrome.exe",
-          lad + "/360Chrome/Chrome/User Data/Default/Bookmarks" },
-        { "qq",      "QQBrowser", "QQBrowser.exe",
-          lad + "/Tencent/QQBrowser/User Data/Default/Bookmarks" },
-    };
+    // 浏览器数量按「去重后的显示名」统计，而不是配置文件个数
+    QSet<QString> foundBrowsers;
+    for (const BrowserTarget &target : targets)
+        foundBrowsers.insert(target.displayName);
+    total.found = static_cast<int>(foundBrowsers.size());
 
-    int foundCount = 0;
-    for (const auto &t : targets) {
-        if (!QFile::exists(t.bookmarksPath)) continue;
-        foundCount++;
+    for (const BrowserTarget &target : targets) {
+        emit logMessage(QStringLiteral("========== 处理 %1 (%2) ==========")
+                            .arg(target.displayName, QFileInfo(target.bookmarksPath).fileName()));
 
-        emit logMessage(QString("========== 处理 %1 ==========").arg(t.displayName));
-        Result r = processOne(t, items);
+        const Result one = processOne(target, items);
 
-        if (r.ok) {
-            total.browsers << t.displayName;
-            total.added   += r.added;
-            total.skipped += r.skipped;
+        if (one.ok) {
+            if (!total.browsers.contains(target.displayName))
+                total.browsers << target.displayName;
+            total.added   += one.added;
+            total.skipped += one.skipped;
         } else {
-            total.failed << t.displayName;
-            emit logMessage(QString("  %1 处理失败: %2").arg(t.displayName, r.message));
+            if (!total.failed.contains(target.displayName))
+                total.failed << target.displayName;
+            emit logMessage(QStringLiteral("  %1 处理失败: %2")
+                                .arg(target.displayName, one.message));
         }
     }
 
-    total.ok = (foundCount > 0 && total.failed.isEmpty());
-    if (foundCount == 0) {
-        total.message = "未检测到任何受支持的浏览器";
-    } else {
-        total.message = QString("共处理 %1 个浏览器：新增 %2 条，跳过 %3 条")
-                            .arg(total.browsers.size())
-                            .arg(total.added)
-                            .arg(total.skipped);
-        if (!total.failed.isEmpty())
-            total.message += "；失败: " + total.failed.join(", ");
-    }
+    // ok 表示「至少有一个浏览器写入成功」，避免全部失败时仍报成功
+    total.ok = !total.browsers.isEmpty();
+
+    total.message = QStringLiteral("检测到 %1 个浏览器，成功 %2 个：新增 %3 条，跳过 %4 条")
+                        .arg(total.found)
+                        .arg(total.browsers.size())
+                        .arg(total.added)
+                        .arg(total.skipped);
+    if (!total.failed.isEmpty())
+        total.message += QStringLiteral("；失败: %1").arg(total.failed.join(QStringLiteral(", ")));
+
     return total;
 }
 
-// ============================================================
-// 单个浏览器处理
-// ============================================================
+// ===========================================================================
+// 单个目标处理
+// ===========================================================================
 BookmarkManager::Result BookmarkManager::processOne(const BrowserTarget &target,
-                                                     const QList<BookmarkItem> &items)
+                                                    const QList<BookmarkItem> &items)
 {
-    Result r;
-    r.ok = false;
+    Result result;
 
     // ---------- 1. 关闭浏览器 ----------
-    emit logMessage(QString("  关闭 %1 ...").arg(target.killProcess));
-    QProcess kill;
-    kill.start("taskkill",
-               QStringList() << "/F" << "/IM" << target.killProcess);
-    kill.waitForFinished(8000);
-    QThread::msleep(1200);   // 等待文件句柄释放
+    if (ProcessManager::isProcessRunning(target.processName)) {
+        emit logMessage(QStringLiteral("  正在关闭 %1 ...").arg(target.processName));
 
-    // ---------- 2. 读取书签文件 ----------
-    QFile in(target.bookmarksPath);
-    if (!in.open(QIODevice::ReadOnly)) {
-        r.message = "无法读取: " + target.bookmarksPath;
-        return r;
-    }
-    QByteArray data = in.readAll();
-    in.close();
+        QProcess kill;
+        kill.start(QStringLiteral("taskkill"),
+                   {QStringLiteral("/F"), QStringLiteral("/IM"), target.processName});
+        kill.waitForFinished(10000);
 
-    // ---------- 3. 备份 ----------
-    QString backupPath = target.bookmarksPath + ".czl_bak";
-    QFile::remove(backupPath);
-    QFile::copy(target.bookmarksPath, backupPath);
-    emit logMessage("  已备份原书签: " + backupPath);
+        // 旧版固定 msleep(1200) 靠猜；这里轮询确认进程真的退出，
+        // 否则书签文件仍被占用，写入必然失败。
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 8000
+               && ProcessManager::isProcessRunning(target.processName)) {
+            QThread::msleep(250);
+        }
 
-    // ---------- 4. 解析 JSON ----------
-    QJsonParseError perr;
-    QJsonDocument doc = QJsonDocument::fromJson(data, &perr);
-    if (perr.error != QJsonParseError::NoError) {
-        r.message = "JSON 解析失败: " + perr.errorString();
-        return r;
-    }
-    QJsonObject root = doc.object();
-
-    if (!root.contains("roots")) {
-        r.message = "书签文件缺少 roots 节点";
-        return r;
-    }
-    QJsonObject roots = root["roots"].toObject();
-    if (!roots.contains("bookmark_bar")) {
-        r.message = "书签文件缺少 bookmark_bar 节点";
-        return r;
-    }
-
-    // ---------- 5. 收集所有已存在的 URL ----------
-    QSet<QString> existingUrls;
-    for (const QString &rootKey : { QString("bookmark_bar"),
-                                    QString("other"),
-                                    QString("synced") }) {
-        if (roots.contains(rootKey)) {
-            collectUrls(roots[rootKey].toObject(), existingUrls);
+        if (ProcessManager::isProcessRunning(target.processName)) {
+            result.message = QStringLiteral("%1 无法关闭，书签文件可能被占用")
+                                 .arg(target.processName);
+            return result;
         }
     }
-    emit logMessage(QString("  已存在书签数量: %1").arg(existingUrls.size()));
+
+    // ---------- 2. 读取 ----------
+    QFile input(target.bookmarksPath);
+    if (!input.open(QIODevice::ReadOnly)) {
+        result.message = QStringLiteral("无法读取: %1 (%2)")
+                             .arg(target.bookmarksPath, input.errorString());
+        return result;
+    }
+    const QByteArray data = input.readAll();
+    input.close();
+
+    // ---------- 3. 备份（带时间戳，避免覆盖上一次的备份） ----------
+    const QString stamp =
+        QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"));
+    const QString backupPath = QStringLiteral("%1.%2.czl_bak")
+                                   .arg(target.bookmarksPath, stamp);
+    if (!QFile::copy(target.bookmarksPath, backupPath)) {
+        emit logMessage(QStringLiteral("  警告：备份失败（继续处理）: %1").arg(backupPath));
+    } else {
+        emit logMessage(QStringLiteral("  已备份原书签: %1").arg(backupPath));
+    }
+
+    // ---------- 4. 解析 ----------
+    QJsonParseError parseError{};
+    const QJsonDocument document = QJsonDocument::fromJson(data, &parseError);
+    if (parseError.error != QJsonParseError::NoError) {
+        result.message = QStringLiteral("JSON 解析失败: %1").arg(parseError.errorString());
+        return result;
+    }
+    if (!document.isObject()) {
+        result.message = QStringLiteral("书签文件根节点不是 JSON 对象");
+        return result;
+    }
+
+    QJsonObject root = document.object();
+    if (!root.contains(QStringLiteral("roots"))) {
+        result.message = QStringLiteral("书签文件缺少 roots 节点");
+        return result;
+    }
+
+    QJsonObject roots = root.value(QStringLiteral("roots")).toObject();
+    if (!roots.contains(QStringLiteral("bookmark_bar"))) {
+        result.message = QStringLiteral("书签文件缺少 bookmark_bar 节点");
+        return result;
+    }
+
+    const QStringList rootKeys{QStringLiteral("bookmark_bar"),
+                               QStringLiteral("other"),
+                               QStringLiteral("synced")};
+
+    // ---------- 5. 已存在的 URL ----------
+    QSet<QString> existingUrls;
+    for (const QString &key : rootKeys) {
+        if (roots.contains(key))
+            collectUrls(roots.value(key).toObject(), existingUrls);
+    }
+    emit logMessage(QStringLiteral("  已存在书签数量: %1").arg(existingUrls.size()));
 
     // ---------- 6. 计算当前最大 id ----------
     qint64 maxId = 0;
-    for (const QString &rootKey : { QString("bookmark_bar"),
-                                    QString("other"),
-                                    QString("synced") }) {
-        if (roots.contains(rootKey)) {
-            maxId = findMaxId(roots[rootKey].toObject(), maxId);
-        }
+    for (const QString &key : rootKeys) {
+        if (roots.contains(key))
+            maxId = findMaxId(roots.value(key).toObject(), maxId);
     }
 
-    // ---------- 7. 逐项处理 ----------
+    // ---------- 7. 生成新书签 ----------
     QJsonArray newItems;
-    int added = 0, skipped = 0;
+    int added = 0;
+    int skipped = 0;
 
-    for (const auto &item : items) {
-        QString key = normalizeUrl(item.url);
-        if (key.isEmpty()) continue;
+    for (const BookmarkItem &item : items) {
+        const QString key = normalizeUrl(item.url);
+        if (key.isEmpty())
+            continue;
 
         if (existingUrls.contains(key)) {
-            skipped++;
-            emit logMessage(QString("  跳过（已存在）: %1").arg(item.name));
+            ++skipped;
+            emit logMessage(QStringLiteral("  跳过（已存在）: %1").arg(item.name));
             continue;
         }
 
         QJsonObject node = createBookmarkNode(item);
-        node["id"] = QString::number(++maxId);
+        node.insert(QStringLiteral("id"), QString::number(++maxId));
         newItems.append(node);
-        existingUrls.insert(key);   // 防止同一次配置里重复
-        added++;
-        emit logMessage(QString("  新增: %1").arg(item.name));
+        existingUrls.insert(key);   // 同一次配置里的重复项也只加一次
+        ++added;
+        emit logMessage(QStringLiteral("  新增: %1").arg(item.name));
     }
 
-    // ---------- 8. 把新书签放在最前 ----------
-    QJsonObject bar = roots["bookmark_bar"].toObject();
-    QJsonArray oldChildren = bar["children"].toArray();
+    // ---------- 8. 新书签放最前 ----------
+    QJsonObject bar = roots.value(QStringLiteral("bookmark_bar")).toObject();
+    const QJsonArray oldChildren = bar.value(QStringLiteral("children")).toArray();
 
     QJsonArray finalChildren;
-    // 先放新书签（保持 JSON 配置顺序）
-    for (const auto &ni : newItems)
-        finalChildren.append(ni);
-    // 再放原书签
-    for (const auto &oc : oldChildren)
-        finalChildren.append(oc);
+    for (const QJsonValue &value : newItems)
+        finalChildren.append(value);
+    for (const QJsonValue &value : oldChildren)
+        finalChildren.append(value);
 
-    bar["children"]  = finalChildren;
-    bar["date_modified"] = QString::number(chromiumNow());
-    roots["bookmark_bar"] = bar;
-    root["roots"] = roots;
+    bar.insert(QStringLiteral("children"), finalChildren);
+    bar.insert(QStringLiteral("date_modified"), QString::number(chromiumNow()));
+    roots.insert(QStringLiteral("bookmark_bar"), bar);
+    root.insert(QStringLiteral("roots"), roots);
 
     // ---------- 9. 删除 checksum，让 Chromium 重新计算 ----------
-    root.remove("checksum");
+    root.remove(QStringLiteral("checksum"));
 
-    // ---------- 10. 写回文件 ----------
-    QFile out(target.bookmarksPath);
-    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        r.message = "无法写入: " + target.bookmarksPath;
-        return r;
+    // ---------- 10. 写回 ----------
+    QFile output(target.bookmarksPath);
+    if (!output.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        result.message = QStringLiteral("无法写入: %1 (%2)")
+                             .arg(target.bookmarksPath, output.errorString());
+        return result;
     }
-    QByteArray outData = QJsonDocument(root).toJson(QJsonDocument::Indented);
-    out.write(outData);
-    out.close();
 
-    emit logMessage(QString("  完成: 新增 %1，跳过 %2")
-                        .arg(added).arg(skipped));
+    const QByteArray payload =
+        QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (output.write(payload) != payload.size()) {
+        result.message = QStringLiteral("写入不完整: %1").arg(target.bookmarksPath);
+        output.close();
+        return result;
+    }
+    output.close();
 
-    r.ok      = true;
-    r.added   = added;
-    r.skipped = skipped;
-    r.browsers << target.displayName;
-    r.message = QString("%1: 新增 %2，跳过 %3")
-                    .arg(target.displayName).arg(added).arg(skipped);
-    return r;
+    emit logMessage(QStringLiteral("  完成: 新增 %1，跳过 %2").arg(added).arg(skipped));
+
+    result.ok      = true;
+    result.added   = added;
+    result.skipped = skipped;
+    result.browsers << target.displayName;
+    result.message = QStringLiteral("%1: 新增 %2，跳过 %3")
+                         .arg(target.displayName)
+                         .arg(added)
+                         .arg(skipped);
+    return result;
 }
 
-// ============================================================
+// ===========================================================================
 // 工具函数
-// ============================================================
+// ===========================================================================
 void BookmarkManager::collectUrls(const QJsonObject &node, QSet<QString> &urls)
 {
-    if (node["type"].toString() == "url") {
-        QString u = normalizeUrl(node["url"].toString());
-        if (!u.isEmpty()) urls.insert(u);
+    if (node.value(QStringLiteral("type")).toString() == QLatin1String("url")) {
+        const QString url = normalizeUrl(node.value(QStringLiteral("url")).toString());
+        if (!url.isEmpty())
+            urls.insert(url);
     }
-    if (node.contains("children")) {
-        const QJsonArray arr = node["children"].toArray();
-        for (const auto &c : arr) {
-            collectUrls(c.toObject(), urls);
-        }
-    }
+
+    const QJsonArray children = node.value(QStringLiteral("children")).toArray();
+    for (const QJsonValue &child : children)
+        collectUrls(child.toObject(), urls);
 }
 
-bool BookmarkManager::urlExistsInAll(const QJsonObject &roots, const QString &url)
-{
-    QSet<QString> urls;
-    for (const QString &k : { QString("bookmark_bar"),
-                              QString("other"),
-                              QString("synced") }) {
-        if (roots.contains(k))
-            collectUrls(roots[k].toObject(), urls);
-    }
-    return urls.contains(normalizeUrl(url));
-}
-
-qint64 BookmarkManager::findMaxId(const QJsonObject &node, qint64 current) const
+qint64 BookmarkManager::findMaxId(const QJsonObject &node, qint64 current)
 {
     bool ok = false;
-    qint64 id = node["id"].toString().toLongLong(&ok);
-    if (ok && id > current) current = id;
+    const qint64 id = node.value(QStringLiteral("id")).toString().toLongLong(&ok);
+    if (ok && id > current)
+        current = id;
 
-    if (node.contains("children")) {
-        for (const auto &c : node["children"].toArray()) {
-            current = findMaxId(c.toObject(), current);
-        }
-    }
+    const QJsonArray children = node.value(QStringLiteral("children")).toArray();
+    for (const QJsonValue &child : children)
+        current = findMaxId(child.toObject(), current);
+
     return current;
 }
 
 QJsonObject BookmarkManager::createBookmarkNode(const BookmarkItem &item)
 {
-    QJsonObject o;
-    o["date_added"]     = QString::number(chromiumNow());
-    o["date_last_used"] = "0";
-    o["guid"]           = generateGuid();
-    o["id"]             = "0";   // 由调用方赋值
-    o["name"]           = item.name.isEmpty() ? item.url : item.name;
-    o["type"]           = "url";
-    o["url"]            = item.url;
-    return o;
+    const qint64 now = chromiumNow();
+
+    QJsonObject node;
+    node.insert(QStringLiteral("date_added"), QString::number(now));
+    node.insert(QStringLiteral("date_last_used"), QStringLiteral("0"));
+    node.insert(QStringLiteral("guid"), generateGuid());
+    node.insert(QStringLiteral("id"), QStringLiteral("0"));   // 由调用方赋值
+    node.insert(QStringLiteral("name"),
+                item.name.isEmpty() ? item.url : item.name);
+    node.insert(QStringLiteral("type"), QStringLiteral("url"));
+    node.insert(QStringLiteral("url"), item.url);
+    return node;
 }
 
 QString BookmarkManager::generateGuid()
 {
-    QUuid u = QUuid::createUuid();
-    return u.toString(QUuid::WithoutBraces).toLower();
+    // Chromium 的 guid 是不带花括号的小写 UUID
+    return QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
 }
 
 qint64 BookmarkManager::chromiumNow()
 {
     // Chromium 时间戳：自 1601-01-01 起的微秒数
-    const qint64 kEpochOffset = 11644473600000000LL;
+    constexpr qint64 kEpochOffset = 11644473600000000LL;
     return QDateTime::currentMSecsSinceEpoch() * 1000LL + kEpochOffset;
 }
 
 QString BookmarkManager::normalizeUrl(const QString &url)
 {
-    QString u = url.trimmed();
-    // 去掉末尾斜杠（忽略根目录差异）
-    while (u.endsWith('/') && u.length() > 8) u.chop(1);
-    return u.toLower();
+    QString normalized = url.trimmed();
+
+    // 去掉末尾斜杠（"http://a.com" 与 "http://a.com/" 视为同一书签）
+    while (normalized.endsWith(QLatin1Char('/')) && normalized.length() > 8)
+        normalized.chop(1);
+
+    return normalized.toLower();
 }

@@ -1,15 +1,32 @@
 #include "DownloadManager.h"
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
-#include <QNetworkAccessManager>
-#include <QNetworkRequest>
-#include <QNetworkReply>
-#include <QEventLoop>
-#include <QTimer>
-#include <QDebug>
 
-DownloadManager::DownloadManager(QObject *parent) : QObject(parent) {}
+#include <QDir>
+#include <QEventLoop>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QPointer>
+#include <QTimer>
+#include <QUrl>
+
+namespace {
+
+/// 探测结果。
+struct ProbeOutcome {
+    bool    reachable = false;
+    QString message;
+};
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// 构造 / 服务器列表
+// ---------------------------------------------------------------------------
+DownloadManager::DownloadManager(QObject *parent)
+    : QObject(parent)
+    , m_nam(new QNetworkAccessManager(this))
+{
+}
 
 void DownloadManager::setServers(const QList<ServerConfig> &servers)
 {
@@ -17,263 +34,220 @@ void DownloadManager::setServers(const QList<ServerConfig> &servers)
     m_activeIndex = -1;
 }
 
+void DownloadManager::setActiveServerIndex(int index)
+{
+    m_activeIndex = (index >= 0 && index < m_servers.size()) ? index : -1;
+}
+
 QString DownloadManager::activeServerName() const
 {
-    if (m_activeIndex >= 0 && m_activeIndex < m_servers.size())
-        return m_servers[m_activeIndex].name;
-    return QString();
+    if (m_activeIndex < 0 || m_activeIndex >= m_servers.size())
+        return {};
+    return m_servers.at(m_activeIndex).name;
 }
 
-QString DownloadManager::resolveLocalPath(const QString &relativePath) const
+ServerConfig DownloadManager::activeServer() const
 {
-    QString full = m_localBaseDir;
-    if (!full.endsWith('/') && !full.endsWith('\\'))
-        full += "/";
-    full += relativePath;
-    return QDir::toNativeSeparators(full);
+    if (m_activeIndex < 0 || m_activeIndex >= m_servers.size())
+        return {};
+    return m_servers.at(m_activeIndex);
 }
 
-bool DownloadManager::ensureDirExists(const QString &filePath)
+// ---------------------------------------------------------------------------
+// 路径 / URL
+// ---------------------------------------------------------------------------
+QString DownloadManager::resolveLocalPath(const QString &localBaseDir,
+                                          const QString &relativePath)
 {
-    QFileInfo fi(filePath);
-    QDir dir(fi.absolutePath());
-    if (!dir.exists()) return dir.mkpath(".");
-    return true;
+    QString base = localBaseDir.trimmed();
+    if (base.isEmpty())
+        base = QStringLiteral("D:/c_temp");
+
+    const QDir dir(base);
+    const QString relative = QDir::fromNativeSeparators(relativePath);
+    return QDir::toNativeSeparators(dir.absoluteFilePath(relative));
 }
 
-QUrl DownloadManager::buildUrl(const QString &remotePath, const ServerConfig &s) const
+QUrl DownloadManager::buildUrl(const QString &remotePath, const ServerConfig &server)
 {
+    // QUrl::setPath 默认按已解码文本处理，会自动做百分号编码，
+    // 因此中文/空格文件名不会再像旧版那样拼出非法 URL。
+    const QString relative = remotePath.startsWith(QLatin1Char('/'))
+                                 ? remotePath.mid(1)
+                                 : remotePath;
+
     QUrl url;
-    if (s.type == "ftp") {
-        url.setScheme("ftp");
-        url.setHost(s.host);
-        url.setPort(s.port);
-        url.setUserName(s.username);
-        url.setPassword(s.password);
-        url.setPath(s.basePath + remotePath);
+    if (server.type == QLatin1String("http")) {
+        url = QUrl(server.baseUrl + relative);
+        if (!server.username.isEmpty()) {
+            url.setUserName(server.username);
+            url.setPassword(server.password);
+        }
     } else {
-        url = QUrl(s.baseUrl + remotePath);
+        url.setScheme(QStringLiteral("ftp"));
+        url.setHost(server.host);
+        url.setPort(server.port);
+        if (!server.username.isEmpty()) {
+            url.setUserName(server.username);
+            url.setPassword(server.password);
+        }
+        url.setPath(server.basePath + relative);
     }
     return url;
 }
 
-// ============================================================
+void DownloadManager::applyServerToRequest(QNetworkRequest &request,
+                                           const ServerConfig &server,
+                                           int timeoutMs)
+{
+    if (server.type == QLatin1String("http") && !server.username.isEmpty()) {
+        const QByteArray credentials =
+            (server.username + QLatin1Char(':') + server.password).toUtf8();
+        request.setRawHeader(QByteArrayLiteral("Authorization"),
+                             QByteArrayLiteral("Basic ") + credentials.toBase64());
+    }
+
+    // Qt 6 自带的传输超时，取代旧版手写的 QTimer + QEventLoop 组合。
+    request.setTransferTimeout(qMax(1000, timeoutMs));
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
+    request.setHeader(QNetworkRequest::UserAgentHeader,
+                      QStringLiteral("czl_installer/2.0 (Qt6)"));
+}
+
+bool DownloadManager::isServerAliveError(int networkError)
+{
+    // 显式白名单：只有「收到了协议层响应」才算服务器活着。
+    switch (static_cast<QNetworkReply::NetworkError>(networkError)) {
+    case QNetworkReply::NoError:
+    case QNetworkReply::ContentNotFoundError:           // 404：服务在，只是路径不对
+    case QNetworkReply::AuthenticationRequiredError:    // 401：服务在，只是要认证
+    case QNetworkReply::ContentAccessDenied:            // 403
+    case QNetworkReply::ProtocolUnknownError:
+    case QNetworkReply::ProtocolInvalidOperationError:
+    case QNetworkReply::UnknownContentError:
+    case QNetworkReply::ContentConflictError:
+    case QNetworkReply::InternalServerError:
+    case QNetworkReply::ServiceUnavailableError:
+        return true;
+    default:
+        return false;
+    }
+}
+
+QString DownloadManager::describeNetworkError(int networkError)
+{
+    switch (static_cast<QNetworkReply::NetworkError>(networkError)) {
+    case QNetworkReply::HostNotFoundError:
+        return QStringLiteral("主机无法解析");
+    case QNetworkReply::TimeoutError:
+        return QStringLiteral("连接超时");
+    case QNetworkReply::ConnectionRefusedError:
+        return QStringLiteral("连接被拒绝");
+    case QNetworkReply::RemoteHostClosedError:
+        return QStringLiteral("对端关闭连接");
+    case QNetworkReply::NetworkSessionFailedError:
+        return QStringLiteral("网络会话失败");
+    case QNetworkReply::TemporaryNetworkFailureError:
+        return QStringLiteral("临时网络故障");
+    case QNetworkReply::ProxyConnectionRefusedError:
+    case QNetworkReply::ProxyNotFoundError:
+    case QNetworkReply::ProxyTimeoutError:
+        return QStringLiteral("代理不可用");
+    case QNetworkReply::SslHandshakeFailedError:
+        return QStringLiteral("TLS 握手失败");
+    case QNetworkReply::AuthenticationRequiredError:
+        return QStringLiteral("认证失败（401）");
+    case QNetworkReply::ContentAccessDenied:
+        return QStringLiteral("访问被拒绝（403）");
+    case QNetworkReply::ContentNotFoundError:
+        return QStringLiteral("资源不存在（404）");
+    default:
+        return QStringLiteral("网络错误 %1").arg(networkError);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 探测
-// ============================================================
+// ---------------------------------------------------------------------------
 bool DownloadManager::probeServers(bool force)
 {
-    if (!force && hasActiveServer()) return true;
-    if (m_servers.isEmpty()) { emit allServersUnavailable(); return false; }
+    if (!force && hasActiveServer())
+        return true;
 
-    QString prev = activeServerName();
+    if (m_servers.isEmpty()) {
+        emit allServersUnavailable();
+        return false;
+    }
+
+    const QString previous = activeServerName();
     m_activeIndex = -1;
 
-    const int total = m_servers.size();
-    for (int i = 0; i < total; ++i) {
-        const ServerConfig &s = m_servers[i];
-        emit serverProbeStarted(s.name, i + 1, total);
+    const int total = static_cast<int>(m_servers.size());
+    for (int index = 0; index < total; ++index) {
+        const ServerConfig &server = m_servers.at(index);
+        emit serverProbeStarted(server.name, index + 1, total);
 
-        if (probeServer(s)) {
-            m_activeIndex = i;
-            qDebug() << "选定服务器:" << s.name;
-            if (!prev.isEmpty() && prev != s.name)
-                emit serverSwitched(prev, s.name);
+        if (probeServer(server)) {
+            m_activeIndex = index;
+            if (!previous.isEmpty() && previous != server.name)
+                emit serverSwitched(previous, server.name);
             return true;
         }
     }
 
-    qWarning() << "所有服务器均不可用";
+    qWarning() << "所有备用服务器均不可达";
     emit allServersUnavailable();
     return false;
 }
 
-bool DownloadManager::probeServer(const ServerConfig &s)
+bool DownloadManager::probeServer(const ServerConfig &server)
 {
-    QUrl url;
-    if (s.type == "ftp") {
-        url.setScheme("ftp");
-        url.setHost(s.host);
-        url.setPort(s.port);
-        url.setUserName(s.username);
-        url.setPassword(s.password);
-        url.setPath(s.basePath);
-    } else {
-        url = QUrl(s.baseUrl);
-    }
+    const QUrl url = buildUrl(QString(), server);
 
-    QNetworkAccessManager mgr;
-    QNetworkRequest req(url);
-    if (s.type == "http" && !s.username.isEmpty()) {
-        QString auth = s.username + ":" + s.password;
-        req.setRawHeader("Authorization", "Basic " + auth.toUtf8().toBase64());
-    }
+    QNetworkRequest request(url);
+    applyServerToRequest(request, server, server.connectTimeout);
 
-    QNetworkReply *reply = mgr.get(req);
+    // HEAD 只取响应头：旧版用 GET，探测阶段会把整个文件下载一遍。
+    QNetworkReply *reply = m_nam->head(request);
+
     QEventLoop loop;
     QTimer timer;
     timer.setSingleShot(true);
+
     QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    timer.start(s.connectTimeout);
+
+    timer.start(server.connectTimeout);
     loop.exec();
 
-    bool reachable = false;
-    QString message;
+    ProbeOutcome outcome;
 
     if (timer.isActive()) {
-        if (reply->error() == QNetworkReply::NoError) {
-            reachable = true;
-            message = "连接成功";
+        const auto error = reply->error();
+        if (error == QNetworkReply::NoError) {
+            outcome.reachable = true;
+            outcome.message = QStringLiteral("连接成功");
+        } else if (isServerAliveError(static_cast<int>(error))) {
+            outcome.reachable = true;
+            outcome.message = QStringLiteral("服务器在线（%1）")
+                                  .arg(describeNetworkError(static_cast<int>(error)));
         } else {
-            switch (reply->error()) {
-            case QNetworkReply::HostNotFoundError:
-            case QNetworkReply::TimeoutError:
-            case QNetworkReply::ConnectionRefusedError:
-            case QNetworkReply::RemoteHostClosedError:
-            case QNetworkReply::NetworkSessionFailedError:
-            case QNetworkReply::TemporaryNetworkFailureError:
-            case QNetworkReply::ProxyConnectionRefusedError:
-            case QNetworkReply::ProxyNotFoundError:
-            case QNetworkReply::ProxyTimeoutError:
-                reachable = false;
-                message = "不可达: " + reply->errorString();
-                break;
-            default:
-                reachable = true;   // 4xx/5xx/550 等说明服务器响应了
-                message = "服务器响应: " + reply->errorString();
-                break;
-            }
+            outcome.reachable = false;
+            outcome.message = describeNetworkError(static_cast<int>(error));
         }
     } else {
+        // 超时：先断开信号再 abort，避免 abort 触发的 finished 再次进入 loop
+        QObject::disconnect(reply, nullptr, &loop, nullptr);
         reply->abort();
-        reachable = false;
-        message = QString("连接超时（%1ms）").arg(s.connectTimeout);
+        outcome.reachable = false;
+        outcome.message = QStringLiteral("连接超时（%1 ms）").arg(server.connectTimeout);
     }
 
-    emit serverProbeResult(s.name, reachable, message);
-    qDebug() << "探测:" << s.name << "->" << (reachable ? "OK" : "FAIL") << message;
+    emit serverProbeResult(server.name, outcome.reachable, outcome.message);
+    qInfo() << "探测服务器:" << server.name
+            << (outcome.reachable ? "OK" : "FAIL") << outcome.message;
 
     reply->deleteLater();
-    return reachable;
-}
-
-// ============================================================
-// 单文件下载
-// ============================================================
-bool DownloadManager::downloadOnce(const QString &remotePath,
-                                    const QString &localPath,
-                                    const ServerConfig &s,
-                                    int timeoutMs)
-{
-    ensureDirExists(localPath);
-    if (QFile::exists(localPath)) {
-        if (!QFile::remove(localPath)) {
-            emit downloadError("无法删除旧文件: " + localPath);
-            return false;
-        }
-    }
-
-    QFile file(localPath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        emit downloadError("无法创建本地文件: " + localPath);
-        return false;
-    }
-
-    QNetworkAccessManager mgr;
-    QUrl url = buildUrl(remotePath, s);
-    QNetworkRequest req(url);
-    if (s.type == "http" && !s.username.isEmpty()) {
-        QString auth = s.username + ":" + s.password;
-        req.setRawHeader("Authorization", "Basic " + auth.toUtf8().toBase64());
-    }
-
-    QNetworkReply *reply = mgr.get(req);
-    QEventLoop loop;
-    QTimer timer;
-    timer.setSingleShot(true);
-    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
-    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    QObject::connect(reply, &QNetworkReply::readyRead, [&file, reply]() {
-        file.write(reply->readAll());
-    });
-    QObject::connect(reply, &QNetworkReply::downloadProgress,
-                     this, &DownloadManager::downloadProgress);
-
-    timer.start(timeoutMs);
-    loop.exec();
-
-    bool ok = false;
-    if (timer.isActive() && reply->error() == QNetworkReply::NoError) {
-        file.write(reply->readAll());
-        file.close();
-        ok = true;
-        qDebug() << "下载成功[" << s.name << "]:" << remotePath;
-    } else {
-        if (!timer.isActive()) reply->abort();
-        file.close();
-        file.remove();
-        qWarning() << "下载失败[" << s.name << "]:" << reply->errorString();
-    }
-    reply->deleteLater();
-    return ok;
-}
-
-bool DownloadManager::downloadFileSync(const QString &remotePath,
-                                        const QString &localPath,
-                                        int timeoutMs)
-{
-    if (m_servers.isEmpty()) {
-        emit downloadError("没有配置任何服务器");
-        return false;
-    }
-    if (!hasActiveServer() && !probeServers()) {
-        emit downloadError("所有服务器均不可达，无法下载: " + remotePath);
-        return false;
-    }
-
-    int startIdx = m_activeIndex;
-    for (int k = 0; k < m_servers.size(); ++k) {
-        int idx = (startIdx + k) % m_servers.size();
-        const ServerConfig &s = m_servers[idx];
-
-        if (downloadOnce(remotePath, localPath, s, timeoutMs)) {
-            if (idx != m_activeIndex) {
-                QString prev = activeServerName();
-                m_activeIndex = idx;
-                emit serverSwitched(prev, s.name);
-            }
-            emit downloadFinished(localPath);
-            return true;
-        }
-    }
-
-    emit downloadError("所有服务器均下载失败: " + remotePath);
-    return false;
-}
-
-bool DownloadManager::downloadDirectorySync(const QString &remoteDir,
-                                             const QString &localDir,
-                                             const QStringList &files,
-                                             int timeoutMs)
-{
-    if (files.isEmpty()) {
-        qWarning() << "目录下载需要 files 列表:" << remoteDir;
-        return false;
-    }
-
-    QString rd = remoteDir;
-    if (!rd.endsWith('/')) rd += '/';
-    QDir().mkpath(localDir);
-
-    for (const QString &f : files) {
-        QString remoteFile = rd + f;
-        QString localFile = localDir;
-        if (!localFile.endsWith('/') && !localFile.endsWith('\\'))
-            localFile += "/";
-        localFile += f;
-
-        if (!downloadFileSync(remoteFile, localFile, timeoutMs))
-            return false;
-    }
-    return true;
+    return outcome.reachable;
 }

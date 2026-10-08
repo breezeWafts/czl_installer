@@ -2,172 +2,283 @@
 
 #include <QApplication>
 #include <QComboBox>
-#include <QDebug>
 #include <QFont>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QIcon>
 #include <QLabel>
 #include <QListWidget>
+#include <QMessageBox>
+#include <QPixmap>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTimer>
+#include <QToolButton>
 #include <QTreeView>
 #include <QVBoxLayout>
 
+#include "BookmarkManager.h"
 #include "ConfigManager.h"
 #include "DownloadManager.h"
 #include "InstallManager.h"
-#include "TreeModel.h"
 #include "InstallItemModel.h"
-#include "BookmarkManager.h"
 #include "Logger.h"
+#include "Theme.h"
+#include "TreeModel.h"
 
-// ============================================================
-// 构造 / 析构
-// ============================================================
-MainWindow::MainWindow(ConfigManager      *cfg,
-                       DownloadManager    *dl,
-                       BookmarkManager    *bm,
-                       InstallManager     *im,
-                       TreeModel          *tm,
-                       InstallItemModel   *iim,
-                       QWidget            *parent)
-    : QMainWindow(parent)
-    , m_config(cfg)
-    , m_dl(dl)
-    , m_bm(bm)
-    , m_im(im)
-    , m_treeModel(tm)
-    , m_itemModel(iim)
+namespace {
+
+/// 卡片类型的中文标签 + 配色，让右侧列表一眼能区分安装方式。
+struct TypeBadge {
+    const char *label;
+    const char *bg;
+    const char *fg;
+};
+
+/// 卡片类型徽标。
+/// 注意：label 是普通 C 字符串（UTF-8 字节），取出时必须用
+/// QString::fromUtf8 —— 用 fromLatin1 会显示成 "å¤å¶" 这样的乱码。
+TypeBadge badgeForType(const QString &type)
 {
-    setWindowTitle("czl_installer - 软件安装管理器");
-    resize(1200, 750);
+    if (type == QLatin1String("msi"))  return {"MSI",  "#ebf4ff", "#2b6cb0"};
+    if (type == QLatin1String("exe"))  return {"EXE",  "#e6fffa", "#2c7a7b"};
+    if (type == QLatin1String("bat"))  return {"BAT",  "#fffaf0", "#9c4221"};
+    if (type == QLatin1String("copy_only"))
+        return {"复制", "#f0fff4", "#2f855a"};
+    if (type == QLatin1String("copy_and_register"))
+        return {"复制+注册", "#faf5ff", "#6b46c1"};
+    return {"未知", "#edf2f7", "#4a5568"};
+}
 
+QString statusTextFor(const QString &status)
+{
+    if (status == QLatin1String(InstallItemModel::kStatusInstalling))
+        return QStringLiteral("安装中...");
+    if (status == QLatin1String(InstallItemModel::kStatusDone))
+        return QStringLiteral("已安装");
+    if (status == QLatin1String(InstallItemModel::kStatusFailed))
+        return QStringLiteral("重试");
+    return QStringLiteral("安装");
+}
+
+} // namespace
+
+// ===========================================================================
+// 构造 / 析构
+// ===========================================================================
+MainWindow::MainWindow(ConfigManager *config,
+                       DownloadManager *downloadManager,
+                       BookmarkManager *bookmarkManager,
+                       InstallManager *installManager,
+                       TreeModel *treeModel,
+                       InstallItemModel *itemModel,
+                       QWidget *parent)
+    : QMainWindow(parent)
+    , m_config(config)
+    , m_dl(downloadManager)
+    , m_bm(bookmarkManager)
+    , m_im(installManager)
+    , m_treeModel(treeModel)
+    , m_itemModel(itemModel)
+{
+    setWindowTitle(QStringLiteral("czl_installer · 软件安装管理器"));
+    resize(1240, 800);
+    setMinimumSize(940, 600);
+
+    applyWindowIcon();
     setupUi();
     setupConnections();
 
-    // 启动时同步一下服务器名显示
+    // 初始状态：载入类别树并选中第一项，列表不为空
+    m_treeModel->reload();
+    m_treeView->expandAll();
+
+    const QModelIndex first = m_treeModel->firstLeafOrTopIndex();
+    if (first.isValid())
+        m_treeView->setCurrentIndex(first);
+    else {
+        m_itemModel->loadAll();
+        rebuildItemList();
+    }
+
     onActiveServerChanged();
+    onBusyChanged(false);
 }
 
-MainWindow::~MainWindow() {}
+MainWindow::~MainWindow() = default;
 
-// ============================================================
-// UI 构建
-// ============================================================
+// ===========================================================================
+// 图标
+// ===========================================================================
+void MainWindow::applyWindowIcon()
+{
+    // 可执行文件图标由 app.rc 的 RT_GROUP_ICON 提供；
+    // 这里再设置一次窗口/任务栏图标，并显式覆盖任务栏分组图标。
+    QIcon icon(QStringLiteral(":/icons/app.png"));
+    if (icon.isNull())
+        icon = QIcon(QStringLiteral("app.ico"));
+
+    if (!icon.isNull()) {
+        setWindowIcon(icon);
+        QApplication::setWindowIcon(icon);
+    }
+}
+
+// ===========================================================================
+// UI
+// ===========================================================================
+QWidget *MainWindow::createPanelHeader(const QString &title, const QString &subtitle)
+{
+    auto *header = new QWidget;
+    header->setObjectName(QStringLiteral("panelHeader"));
+    header->setStyleSheet(QStringLiteral(
+        "QWidget#panelHeader {"
+        "   background:%1;"
+        "   border-bottom:1px solid %2;"
+        "}").arg(QLatin1String(Theme::kHeaderBg),
+                 QLatin1String(Theme::kBorder)));
+
+    auto *layout = new QVBoxLayout(header);
+    layout->setContentsMargins(14, 9, 14, 9);
+    layout->setSpacing(1);
+
+    auto *titleLabel = new QLabel(title, header);
+    QFont titleFont = titleLabel->font();
+    titleFont.setBold(true);
+    titleFont.setPointSize(titleFont.pointSize() + 1);
+    titleLabel->setFont(titleFont);
+
+    auto *subtitleLabel = new QLabel(subtitle, header);
+    subtitleLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-size:8.5pt;")
+            .arg(QLatin1String(Theme::kTextMuted)));
+
+    layout->addWidget(titleLabel);
+    if (!subtitle.isEmpty())
+        layout->addWidget(subtitleLabel);
+    else
+        subtitleLabel->hide();
+
+    return header;
+}
+
 void MainWindow::setupUi()
 {
     // ---------------- 顶部工具栏 ----------------
-    QWidget *toolbar = new QWidget(this);
-    toolbar->setStyleSheet("background:#f5f5f5; border-bottom:1px solid #ddd;");
-    QHBoxLayout *tbLayout = new QHBoxLayout(toolbar);
-    tbLayout->setContentsMargins(12, 6, 12, 6);
-    tbLayout->setSpacing(12);
+    auto *toolbar = new QWidget(this);
+    toolbar->setObjectName(QStringLiteral("topBar"));
+    toolbar->setStyleSheet(QStringLiteral(
+        "QWidget#topBar {"
+        "   background:%1;"
+        "   border-bottom:1px solid %2;"
+        "}").arg(QLatin1String(Theme::kSurface),
+                 QLatin1String(Theme::kBorder)));
 
-    QLabel *serverLabel = new QLabel("服务器方式:");
-    QFont boldFont = serverLabel->font();
-    boldFont.setBold(true);
-    serverLabel->setFont(boldFont);
+    auto *toolbarLayout = new QHBoxLayout(toolbar);
+    toolbarLayout->setContentsMargins(16, 10, 16, 10);
+    toolbarLayout->setSpacing(10);
 
-    m_serverTypeCombo = new QComboBox;
-    m_serverTypeCombo->addItem("FTP (多地址备选)");
-    m_serverTypeCombo->addItem("HTTP (多地址备选)");
-    m_serverTypeCombo->setCurrentIndex(0);
-    m_serverTypeCombo->setMinimumWidth(180);
+    // 左侧：品牌名
+    auto *brandLabel = new QLabel(QStringLiteral("czl_installer"), toolbar);
+    QFont brandFont = brandLabel->font();
+    brandFont.setBold(true);
+    brandFont.setPointSize(brandFont.pointSize() + 2);
+    brandLabel->setFont(brandFont);
+    brandLabel->setStyleSheet(
+        QStringLiteral("color:%1;").arg(QLatin1String(Theme::kPrimary)));
+    toolbarLayout->addWidget(brandLabel);
 
-    tbLayout->addWidget(serverLabel);
-    tbLayout->addWidget(m_serverTypeCombo);
-    tbLayout->addStretch();
+    // 分隔符
+    auto *separator = new QFrame(toolbar);
+    separator->setFrameShape(QFrame::VLine);
+    separator->setStyleSheet(
+        QStringLiteral("color:%1;").arg(QLatin1String(Theme::kBorder)));
+    separator->setFixedHeight(22);
+    toolbarLayout->addWidget(separator);
 
-    m_activeServerLabel = new QLabel("当前服务器: 未连接");
-    m_activeServerLabel->setStyleSheet("color:#999; font-weight:bold;");
-    tbLayout->addWidget(m_activeServerLabel);
+    // 服务器类型
+    auto *serverLabel = new QLabel(QStringLiteral("服务器"), toolbar);
+    serverLabel->setStyleSheet(
+        QStringLiteral("color:%1;").arg(QLatin1String(Theme::kTextSecondary)));
 
-    m_localDirLabel = new QLabel("本地缓存: " + m_config->localBaseDir());
-    m_localDirLabel->setStyleSheet("color:#666;");
-    // ★ 设置浏览器书签按钮
-    m_setBookmarksBtn = new QPushButton("设置浏览器书签");
-    m_setBookmarksBtn->setMinimumHeight(28);
-    m_setBookmarksBtn->setStyleSheet(
-        "QPushButton {"
-        "   background:#4a90d9; color:white;"
-        "   border:none; border-radius:4px;"
-        "   padding:4px 14px; font-weight:bold;"
-        "}"
-        "QPushButton:hover { background:#5aa0e9; }"
-        "QPushButton:pressed { background:#3a7bc0; }");
+    m_serverTypeCombo = new QComboBox(toolbar);
+    m_serverTypeCombo->addItem(QStringLiteral("FTP · 多地址备选"));
+    m_serverTypeCombo->addItem(QStringLiteral("HTTP · 多地址备选"));
+    m_serverTypeCombo->setMinimumWidth(190);
+    m_serverTypeCombo->setToolTip(
+        QStringLiteral("切换 config/config_ftp.json 或 config/config_http.json"));
 
-    tbLayout->addWidget(m_setBookmarksBtn);
-    tbLayout->addWidget(m_localDirLabel);
+    toolbarLayout->addWidget(serverLabel);
+    toolbarLayout->addWidget(m_serverTypeCombo);
+    toolbarLayout->addStretch(1);
 
+    // 右侧：当前服务器状态胶囊
+    m_activeServerLabel = new QLabel(toolbar);
+    m_activeServerLabel->setAlignment(Qt::AlignCenter);
+    m_activeServerLabel->setMinimumHeight(26);
+    m_activeServerLabel->setContentsMargins(12, 0, 12, 0);
+    toolbarLayout->addWidget(m_activeServerLabel);
 
-    // ---------------- 主体：QSplitter 左树右列表 ----------------
-    QSplitter *splitter = new QSplitter(Qt::Horizontal, this);
+    // ---------------- 主体：左树右列表 ----------------
+    auto *splitter = new QSplitter(Qt::Horizontal, this);
+    splitter->setChildrenCollapsible(false);
+    splitter->setHandleWidth(1);
 
     // ===== 左侧：类别树 =====
-    QWidget *leftPanel = new QWidget;
-    QVBoxLayout *leftLayout = new QVBoxLayout(leftPanel);
+    auto *leftPanel = new QWidget(splitter);
+    auto *leftLayout = new QVBoxLayout(leftPanel);
     leftLayout->setContentsMargins(0, 0, 0, 0);
     leftLayout->setSpacing(0);
 
-    QLabel *treeTitle = new QLabel("软件类别");
-    treeTitle->setAlignment(Qt::AlignCenter);
-    treeTitle->setStyleSheet(
-        "background:#f0f0f0; padding:10px; "
-        "font-weight:bold; border-bottom:1px solid #ddd;");
-    leftLayout->addWidget(treeTitle);
+    leftLayout->addWidget(
+        createPanelHeader(QStringLiteral("软件类别"),
+                          QStringLiteral("选择类别以筛选右侧列表")));
 
-    m_treeView = new QTreeView;
+    m_treeView = new QTreeView(leftPanel);
     m_treeView->setModel(m_treeModel);
     m_treeView->setHeaderHidden(true);
     m_treeView->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_treeView->setSelectionMode(QAbstractItemView::SingleSelection);
     m_treeView->setUniformRowHeights(true);
     m_treeView->setAnimated(true);
-    m_treeView->setStyleSheet(
-        "QTreeView { padding:4px; }"
-        "QTreeView::item { padding:4px 6px; }"
-        "QTreeView::item:selected { background:#d0e8ff; color:#1a4a80; }"
-        "QTreeView::item:hover { background:#eaf3ff; }");
-    m_treeView->expandAll();
+    m_treeView->setIndentation(16);
+    m_treeView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
-    leftLayout->addWidget(m_treeView);
-    leftPanel->setMinimumWidth(200);
-    leftPanel->setMaximumWidth(400);
+    leftLayout->addWidget(m_treeView, 1);
+    leftPanel->setMinimumWidth(210);
+    leftPanel->setMaximumWidth(420);
 
     // ===== 右侧：可安装程序列表 =====
-    QWidget *rightPanel = new QWidget;
-    QVBoxLayout *rightLayout = new QVBoxLayout(rightPanel);
+    auto *rightPanel = new QWidget(splitter);
+    auto *rightLayout = new QVBoxLayout(rightPanel);
     rightLayout->setContentsMargins(0, 0, 0, 0);
     rightLayout->setSpacing(0);
 
-    QLabel *listTitle = new QLabel("可安装程序列表");
-    listTitle->setAlignment(Qt::AlignCenter);
-    listTitle->setStyleSheet(
-        "background:#f0f0f0; padding:10px; "
-        "font-weight:bold; border-bottom:1px solid #ddd;");
-    rightLayout->addWidget(listTitle);
+    rightLayout->addWidget(
+        createPanelHeader(QStringLiteral("可安装程序"),
+                          QStringLiteral("点击卡片右侧按钮执行安装")));
 
-    m_listWidget = new QListWidget;
+    m_listWidget = new QListWidget(rightPanel);
     m_listWidget->setSelectionMode(QAbstractItemView::NoSelection);
     m_listWidget->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
-    m_listWidget->setSpacing(6);
-    m_listWidget->setStyleSheet("QListWidget { background:#fafafa; border:none; "
-                                "padding:6px; }");
-    m_listWidget->setMouseTracking(true);
-    rightLayout->addWidget(m_listWidget);
+    m_listWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_listWidget->setSpacing(8);
+    m_listWidget->setFocusPolicy(Qt::NoFocus);
+
+    rightLayout->addWidget(m_listWidget, 1);
 
     splitter->addWidget(leftPanel);
     splitter->addWidget(rightPanel);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
-    splitter->setSizes(QList<int>() << 280 << 920);
+    splitter->setSizes({280, 960});
 
     // ---------------- 整体布局 ----------------
-    QWidget *central = new QWidget;
-    QVBoxLayout *mainLayout = new QVBoxLayout(central);
+    auto *central = new QWidget(this);
+    auto *mainLayout = new QVBoxLayout(central);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
     mainLayout->addWidget(toolbar);
@@ -175,86 +286,117 @@ void MainWindow::setupUi()
     setCentralWidget(central);
 
     // ---------------- 底部状态栏 ----------------
-    m_statusLabel = new QLabel("就绪");
-    m_statusLabel->setStyleSheet("padding-left:8px;");
+    m_statusLabel = new QLabel(QStringLiteral("就绪"), this);
+    m_statusLabel->setStyleSheet(
+        QStringLiteral("color:%1; padding-left:10px;")
+            .arg(QLatin1String(Theme::kTextSecondary)));
     statusBar()->addWidget(m_statusLabel, 1);
-    statusBar()->setStyleSheet(
-        "QStatusBar { background:#f8f8f8; border-top:1px solid #e0e0e0; }");
+    statusBar()->setSizeGripEnabled(true);
+
+    m_localDirLabel = new QLabel(
+        QStringLiteral("缓存目录 %1").arg(m_config->localBaseDir()), this);
+    m_localDirLabel->setStyleSheet(
+        QStringLiteral("color:%1; padding-right:10px;")
+            .arg(QLatin1String(Theme::kTextMuted)));
+    m_localDirLabel->setToolTip(m_config->localBaseDir());
+    statusBar()->addPermanentWidget(m_localDirLabel);
+
+    m_setBookmarksBtn = new QPushButton(QStringLiteral("设置浏览器书签"), this);
+    m_setBookmarksBtn->setMinimumHeight(24);
+    m_setBookmarksBtn->setToolTip(
+        QStringLiteral("为所有已安装的 Chromium 系浏览器写入配置中的书签"));
+    m_setBookmarksBtn->setStyleSheet(Theme::primaryButtonStyle());
+    statusBar()->addPermanentWidget(m_setBookmarksBtn);
+    statusBar()->setContentsMargins(0, 2, 8, 2);
 
     m_statusTimer = new QTimer(this);
     m_statusTimer->setSingleShot(true);
-    m_statusTimer->setInterval(5000);
-    connect(m_statusTimer, &QTimer::timeout,
-            this, &MainWindow::resetStatusText);
+    m_statusTimer->setInterval(6000);
 }
 
-// ============================================================
+// ===========================================================================
 // 信号连接
-// ============================================================
+// ===========================================================================
 void MainWindow::setupConnections()
 {
-    // 服务器类型切换
-    connect(m_serverTypeCombo,
-            QOverload<int>::of(&QComboBox::currentIndexChanged),
+    connect(m_serverTypeCombo, &QComboBox::currentIndexChanged,
             this, &MainWindow::onServerTypeChanged);
 
-    // 树选中项变化
-    connect(m_treeView->selectionModel(),
-            &QItemSelectionModel::currentChanged,
+    connect(m_treeView->selectionModel(), &QItemSelectionModel::currentChanged,
             this, &MainWindow::onTreeCurrentChanged);
+
     connect(m_setBookmarksBtn, &QPushButton::clicked,
             this, &MainWindow::onSetBookmarksClicked);
 
-    // 安装流程信号
+    connect(m_statusTimer, &QTimer::timeout,
+            this, &MainWindow::onResetStatusText);
+
     connect(m_im, &InstallManager::installProgress,
             this, &MainWindow::onInstallProgress);
     connect(m_im, &InstallManager::installFinished,
             this, &MainWindow::onInstallFinished);
     connect(m_im, &InstallManager::activeServerChanged,
             this, &MainWindow::onActiveServerChanged);
+    connect(m_im, &InstallManager::busyChanged,
+            this, &MainWindow::onBusyChanged);
 }
 
-// ============================================================
+// ===========================================================================
 // 槽函数
-// ============================================================
+// ===========================================================================
 void MainWindow::onServerTypeChanged(int index)
 {
-    QString t = (index == 0) ? "ftp" : "http";
-    Logger::info(QString("切换服务器方式为: %1").arg(t));
-    m_im->setServerConfigFromQml(t);
+    if (index < 0)
+        return;
 
-    // 重新加载树
+    const QString type = (index == 0) ? QStringLiteral("ftp")
+                                      : QStringLiteral("http");
+    m_im->setServerType(type);
+
     m_treeModel->reload();
     m_treeView->expandAll();
 
-    // 重新加载列表
-    m_itemModel->loadAll();
-    rebuildItemList();
+    const QModelIndex first = m_treeModel->firstLeafOrTopIndex();
+    if (first.isValid())
+        m_treeView->setCurrentIndex(first);
+    else {
+        m_itemModel->loadAll();
+        rebuildItemList();
+    }
 
-    m_localDirLabel->setText("本地缓存: " + m_config->localBaseDir());
+    m_localDirLabel->setText(
+        QStringLiteral("缓存目录 %1").arg(m_config->localBaseDir()));
+    m_localDirLabel->setToolTip(m_config->localBaseDir());
     onActiveServerChanged();
 }
 
 void MainWindow::onTreeCurrentChanged(const QModelIndex &current,
                                       const QModelIndex &previous)
 {
-    Q_UNUSED(previous);
-    if (!current.isValid()) return;
+    Q_UNUSED(previous)
 
-    QString catId = m_treeModel->data(current, TreeModel::IdRole).toString();
-    if (catId.isEmpty()) return;
+    if (!current.isValid())
+        return;
 
-    m_currentCategoryId = catId;
-    Logger::info(QString("选择类别: %1").arg(catId));
-    m_itemModel->filterByCategory(catId);
+    const QString categoryId =
+        m_treeModel->data(current, TreeModel::IdRole).toString();
+    if (categoryId.isEmpty())
+        return;
+
+    m_currentCategoryId = categoryId;
+    Logger::info(QStringLiteral("选择类别: %1").arg(categoryId));
+
+    m_itemModel->filterByCategory(categoryId);
     rebuildItemList();
 }
 
 void MainWindow::onInstallButtonClicked(const QString &itemId)
 {
-    Logger::info(QString("用户点击安装: %1").arg(itemId));
-    m_itemModel->setStatus(itemId, "installing");
-    rebuildItemList();      // 立即把按钮刷成"安装中..."
+    Logger::info(QStringLiteral("用户点击安装: %1").arg(itemId));
+
+    m_itemModel->setStatus(itemId, QString::fromLatin1(
+                                      InstallItemModel::kStatusInstalling));
+    refreshItemRow(itemId);
 
     m_im->installItem(itemId);
 }
@@ -262,221 +404,393 @@ void MainWindow::onInstallButtonClicked(const QString &itemId)
 void MainWindow::onInstallProgress(const QString &itemId, int percent,
                                    const QString &stage)
 {
-    Q_UNUSED(itemId);
-    m_statusLabel->setText(QString("[%1%] %2").arg(percent).arg(stage));
-    m_statusLabel->setStyleSheet("color:#333; padding-left:8px;");
-    QApplication::processEvents();
+    setStatus(stage, Theme::neutralStatusColor());
+
+    auto it = m_rowWidgets.find(itemId);
+    if (it == m_rowWidgets.end())
+        return;
+
+    if (it->stageLabel != nullptr)
+        it->stageLabel->setText(stage);
+    if (it->progress != nullptr && percent > 0)
+        it->progress->setValue(percent);
 }
 
 void MainWindow::onInstallFinished(const QString &itemId, bool success,
-                                   const QString &message)
+                                  const QString &message)
 {
     if (success)
-            Logger::info (QString("安装成功 [%1]: %2").arg(itemId, message));  // ★
-        else
-            Logger::error(QString("安装失败 [%1]: %2").arg(itemId, message));  // ★
-    m_statusLabel->setText(message);
-    m_statusLabel->setStyleSheet(
-        QString("color:%1; padding-left:8px;")
-            .arg(success ? "#2b7a2b" : "#c00"));
+        Logger::info(QStringLiteral("安装成功 [%1]: %2").arg(itemId, message));
+    else
+        Logger::error(QStringLiteral("安装失败 [%1]: %2").arg(itemId, message));
 
-    m_itemModel->setStatus(itemId, success ? "done" : "failed");
-    rebuildItemList();
+    setStatus(message, Theme::statusColor(success));
+
+    m_itemModel->setStatus(itemId, QString::fromLatin1(
+                                      success ? InstallItemModel::kStatusDone
+                                              : InstallItemModel::kStatusFailed));
+    refreshItemRow(itemId);
     m_statusTimer->start();
+}
+
+void MainWindow::onBusyChanged(bool busy)
+{
+    m_serverTypeCombo->setEnabled(!busy);
+    m_setBookmarksBtn->setEnabled(!busy);
+
+    for (auto it = m_rowWidgets.begin(); it != m_rowWidgets.end(); ++it) {
+        if (it->button == nullptr)
+            continue;
+
+        const QString status = m_itemModel->statusOf(it.key());
+        const bool installing =
+            status == QLatin1String(InstallItemModel::kStatusInstalling);
+
+        it->button->setEnabled(!busy && !installing);
+    }
 }
 
 void MainWindow::onActiveServerChanged()
 {
-    QString name = m_dl->activeServerName();
-    if (name.isEmpty()) {
-        m_activeServerLabel->setText("当前服务器: 未连接");
-        m_activeServerLabel->setStyleSheet("color:#999; font-weight:bold;");
-    } else {
-        m_activeServerLabel->setText("当前服务器: " + name);
-        m_activeServerLabel->setStyleSheet("color:#2b7a2b; font-weight:bold;");
-    }
+    const QString name = m_dl->activeServerName();
+    const bool connected = !name.isEmpty();
+
+    // 状态胶囊：已连接为绿色，未连接为灰色
+    m_activeServerLabel->setText(
+        connected ? QStringLiteral("●  %1").arg(name)
+                  : QStringLiteral("○  未连接"));
+    m_activeServerLabel->setToolTip(
+        connected ? QStringLiteral("当前使用的下载服务器")
+                  : QStringLiteral("首次安装时会自动探测可用服务器"));
+
+    m_activeServerLabel->setStyleSheet(
+        QStringLiteral(
+            "QLabel {"
+            "   background:%1; color:%2;"
+            "   border:1px solid %3; border-radius:13px;"
+            "   font-weight:bold; font-size:8.5pt;"
+            "}")
+            .arg(connected ? QStringLiteral("#e6fffa") : QStringLiteral("#f0f2f5"),
+                 connected ? QLatin1String(Theme::kSuccess)
+                           : QLatin1String(Theme::kTextMuted),
+                 connected ? QStringLiteral("#9ae6b4")
+                           : QLatin1String(Theme::kBorder)));
 }
 
-void MainWindow::resetStatusText()
+void MainWindow::onResetStatusText()
 {
-    m_statusLabel->setText("就绪");
-    m_statusLabel->setStyleSheet("color:black; padding-left:8px;");
+    setStatus(QStringLiteral("就绪"), Theme::neutralStatusColor());
 }
 
 void MainWindow::onSetBookmarksClicked()
 {
-    if (!m_bm) return;
+    if (m_bm == nullptr)
+        return;
 
     const QList<BookmarkItem> items = m_config->bookmarks();
     if (items.isEmpty()) {
-        Logger::warn("设置浏览器书签：配置文件中没有书签项");
-        QMessageBox::information(this, "设置浏览器书签",
-            "配置文件中没有书签项（bookmarks 数组为空）。");
+        Logger::warn(QStringLiteral("设置浏览器书签：配置文件中没有书签项"));
+        QMessageBox::information(this, QStringLiteral("设置浏览器书签"),
+                                 QStringLiteral("配置文件中没有书签项"
+                                                "（bookmarks 数组为空）。"));
         return;
     }
-    Logger::info(QString("用户点击设置浏览器书签，共 %1 条")        // ★
-                        .arg(items.size()));
 
-    if (QMessageBox::question(this, "设置浏览器书签",
-            QString("即将为所有已安装的浏览器设置 %1 条书签。\n\n"
-                    "执行期间相关浏览器会被强制关闭，是否继续？")
-                .arg(items.size()),
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::Yes) != QMessageBox::Yes) {
-        Logger::info("用户取消设置浏览器书签");                     // ★
+    Logger::info(QStringLiteral("用户点击设置浏览器书签，共 %1 条").arg(items.size()));
+
+    const auto answer = QMessageBox::question(
+        this, QStringLiteral("设置浏览器书签"),
+        QStringLiteral("即将为所有已安装的浏览器设置 %1 条书签。\n\n"
+                       "执行期间相关浏览器会被强制关闭，是否继续？")
+            .arg(items.size()),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+
+    if (answer != QMessageBox::Yes) {
+        Logger::info(QStringLiteral("用户取消设置浏览器书签"));
         return;
     }
 
     m_setBookmarksBtn->setEnabled(false);
-    m_statusLabel->setText("正在设置浏览器书签...");
-    m_statusLabel->setStyleSheet("color:#333; padding-left:8px;");
-    QApplication::processEvents();
+    setStatus(QStringLiteral("正在设置浏览器书签..."), Theme::neutralStatusColor());
 
-    BookmarkManager::Result r = m_bm->applyToAll(items);
-    Logger::info(QString("设置浏览器书签完成: %1").arg(r.message)); // ★
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const BookmarkManager::Result result = m_bm->applyToAll(items);
+    QApplication::restoreOverrideCursor();
 
-    QString title = r.ok ? "设置完成" : "设置结果";
+    Logger::info(QStringLiteral("设置浏览器书签完成: %1").arg(result.message));
+
     QString detail;
-    if (!r.browsers.isEmpty())
-        detail += "成功: " + r.browsers.join(", ") + "\n";
-    if (!r.failed.isEmpty())
-        detail += "失败: " + r.failed.join(", ") + "\n";
-    detail += "\n" + r.message;
+    if (!result.browsers.isEmpty())
+        detail += QStringLiteral("成功: %1\n")
+                      .arg(result.browsers.join(QStringLiteral(", ")));
+    if (!result.failed.isEmpty())
+        detail += QStringLiteral("失败: %1\n")
+                      .arg(result.failed.join(QStringLiteral(", ")));
+    detail += QStringLiteral("\n%1").arg(result.message);
 
-    QMessageBox::information(this, title, detail);
+    QMessageBox::information(this,
+                             result.ok ? QStringLiteral("设置完成")
+                                       : QStringLiteral("设置结果"),
+                             detail);
 
-    m_setBookmarksBtn->setEnabled(true);
-    m_statusLabel->setText(r.message);
-    m_statusLabel->setStyleSheet(
-        QString("color:%1; padding-left:8px;")
-            .arg(r.ok ? "#2b7a2b" : "#c00"));
+    m_setBookmarksBtn->setEnabled(!m_im->isBusy());
+    setStatus(result.message, Theme::statusColor(result.ok));
     m_statusTimer->start();
 }
 
-// ============================================================
-// 列表重建
-// ============================================================
+// ===========================================================================
+// 列表渲染
+// ===========================================================================
+void MainWindow::setStatus(const QString &text, const QString &color)
+{
+    m_statusLabel->setText(text);
+    m_statusLabel->setStyleSheet(
+        QStringLiteral("color:%1; padding-left:10px;")
+            .arg(color.isEmpty() ? Theme::neutralStatusColor() : color));
+}
+
 void MainWindow::rebuildItemList()
 {
+    m_listWidget->setUpdatesEnabled(false);
     m_listWidget->clear();
+    m_rowWidgets.clear();
 
-    const int n = m_itemModel->rowCount();
-    for (int i = 0; i < n; ++i) {
-        QWidget *row = createItemRow(i);
+    const int count = m_itemModel->rowCount();
+    for (int row = 0; row < count; ++row) {
+        QWidget *widget = createItemRow(row);
 
-        QListWidgetItem *item = new QListWidgetItem(m_listWidget);
-        item->setSizeHint(QSize(0, 90));
-        m_listWidget->setItemWidget(item, row);
+        auto *item = new QListWidgetItem(m_listWidget);
+        item->setSizeHint(QSize(0, Theme::kCardHeight));
+        m_listWidget->setItemWidget(item, widget);
+
+        const QString itemId =
+            m_itemModel->index(row, 0).data(InstallItemModel::ItemIdRole).toString();
+        if (!itemId.isEmpty()) {
+            auto it = m_rowWidgets.find(itemId);
+            if (it != m_rowWidgets.end())
+                it->listItem = item;
+        }
+    }
+
+    m_listWidget->setUpdatesEnabled(true);
+
+    if (count == 0) {
+        setStatus(QStringLiteral("当前类别下没有可安装的程序"));
+    } else {
+        setStatus(QStringLiteral("共 %1 个可安装程序").arg(count));
     }
 }
 
-// ============================================================
-// 单行布局
-// ============================================================
+void MainWindow::refreshItemRow(const QString &itemId)
+{
+    auto it = m_rowWidgets.find(itemId);
+    if (it == m_rowWidgets.end())
+        return;
+
+    const QString status = m_itemModel->statusOf(itemId);
+    const bool installing =
+        status == QLatin1String(InstallItemModel::kStatusInstalling);
+
+    if (it->button != nullptr) {
+        it->button->setText(statusTextFor(status));
+        it->button->setEnabled(!installing && !m_im->isBusy());
+        it->button->setStyleSheet(
+            status == QLatin1String(InstallItemModel::kStatusFailed)
+                ? Theme::retryButtonStyle()
+                : Theme::installButtonStyle());
+    }
+
+    if (it->progress != nullptr) {
+        if (installing) {
+            it->progress->setValue(0);
+            it->progress->setVisible(true);
+        } else {
+            it->progress->setVisible(false);
+        }
+    }
+
+    if (it->stageLabel != nullptr) {
+        if (installing) {
+            it->stageLabel->setText(QStringLiteral("正在安装..."));
+            it->stageLabel->setStyleSheet(
+                QStringLiteral("color:%1; font-size:8.5pt;")
+                    .arg(QLatin1String(Theme::kPrimary)));
+        } else if (status == QLatin1String(InstallItemModel::kStatusDone)) {
+            it->stageLabel->setText(QStringLiteral("✓ 安装完成"));
+            it->stageLabel->setStyleSheet(
+                QStringLiteral("color:%1; font-size:8.5pt;")
+                    .arg(QLatin1String(Theme::kSuccess)));
+        } else if (status == QLatin1String(InstallItemModel::kStatusFailed)) {
+            it->stageLabel->setText(QStringLiteral("✗ 上次安装失败"));
+            it->stageLabel->setStyleSheet(
+                QStringLiteral("color:%1; font-size:8.5pt;")
+                    .arg(QLatin1String(Theme::kDanger)));
+        } else {
+            it->stageLabel->clear();
+        }
+    }
+}
+
 QWidget *MainWindow::createItemRow(int rowIndex)
 {
-    QModelIndex idx = m_itemModel->index(rowIndex, 0);
+    const QModelIndex index = m_itemModel->index(rowIndex, 0);
+    const QString name        = index.data(InstallItemModel::NameRole).toString();
+    const QString version     = index.data(InstallItemModel::VersionRole).toString();
+    const QString publisher   = index.data(InstallItemModel::PublisherRole).toString();
+    const QString description = index.data(InstallItemModel::DescriptionRole).toString();
+    const QString type        = index.data(InstallItemModel::TypeRole).toString();
+    const QString itemId      = index.data(InstallItemModel::ItemIdRole).toString();
+    const QString status =
+        index.data(InstallItemModel::InstallStatusRole).toString();
 
-    const QString name      = idx.data(InstallItemModel::NameRole).toString();
-    const QString version   = idx.data(InstallItemModel::VersionRole).toString();
-    const QString publisher = idx.data(InstallItemModel::PublisherRole).toString();
-    const QString desc      = idx.data(InstallItemModel::DescriptionRole).toString();
-    const QString type      = idx.data(InstallItemModel::TypeRole).toString();
-    const QString itemId    = idx.data(InstallItemModel::ItemIdRole).toString();
-    const QString status    = idx.data(InstallItemModel::InstallStatusRole).toString();
+    // ---------------- 卡片 ----------------
+    auto *row = new QWidget;
+    auto *rowLayout = new QHBoxLayout(row);
+    rowLayout->setContentsMargins(0, 0, 0, 0);
 
-    // ---------------- 外层：给条目留出边距 ----------------
-    QWidget *row = new QWidget;
+    auto *card = new QFrame(row);
+    card->setObjectName(QStringLiteral("itemCard"));
+    card->setStyleSheet(QStringLiteral(
+        "QFrame#itemCard {"
+        "   background:%1;"
+        "   border:1px solid %2;"
+        "   border-radius:%3px;"
+        "}"
+        "QFrame#itemCard:hover {"
+        "   border-color:%4;"
+        "   background:#fbfdff;"
+        "}")
+        .arg(QLatin1String(Theme::kSurface),
+             QLatin1String(Theme::kBorder))
+        .arg(Theme::kRadius)
+        .arg(QLatin1String(Theme::kPrimary)));
+    rowLayout->addWidget(card);
 
-    // 卡片
-    QFrame *frame = new QFrame;
-    frame->setFrameShape(QFrame::StyledPanel);
-    frame->setStyleSheet(
-        "QFrame { background:#ffffff; border:1px solid #ddd; "
-        "        border-radius:6px; }"
-        "QFrame:hover { border-color:#4a90d9; background:#f5faff; }");
+    auto *cardLayout = new QHBoxLayout(card);
+    cardLayout->setContentsMargins(16, 12, 16, 12);
+    cardLayout->setSpacing(14);
 
-    QHBoxLayout *rowLayout = new QHBoxLayout(row);
-    rowLayout->setContentsMargins(6, 3, 6, 3);
-    rowLayout->addWidget(frame);
+    // ---------------- 左侧文字 ----------------
+    auto *textColumn = new QVBoxLayout;
+    textColumn->setSpacing(3);
 
-    // ---------------- 卡片内：左信息 + 右按钮 ----------------
-    QHBoxLayout *card = new QHBoxLayout(frame);
-    card->setContentsMargins(14, 10, 14, 10);
-    card->setSpacing(12);
+    // 第一行：名称 + 类型徽标
+    auto *titleRow = new QHBoxLayout;
+    titleRow->setSpacing(8);
 
-    // 左侧文字
-    QVBoxLayout *textCol = new QVBoxLayout;
-    textCol->setSpacing(2);
-
-    QLabel *nameLabel = new QLabel(name);
+    auto *nameLabel = new QLabel(name, card);
     QFont nameFont = nameLabel->font();
     nameFont.setBold(true);
     nameFont.setPointSize(nameFont.pointSize() + 1);
     nameLabel->setFont(nameFont);
+    nameLabel->setStyleSheet(
+        QStringLiteral("color:%1;").arg(QLatin1String(Theme::kTextPrimary)));
 
-    QLabel *infoLabel = new QLabel(QString("版本: %1  |  发布者: %2")
-        .arg(version.isEmpty()   ? "-" : version,
-             publisher.isEmpty() ? "-" : publisher));
-    infoLabel->setStyleSheet("color:#666; font-size:9pt;");
+    const TypeBadge badge = badgeForType(type);
+    // label 是 UTF-8 的 C 字符串，必须 fromUtf8（fromLatin1 会乱码）
+    auto *badgeLabel = new QLabel(QString::fromUtf8(badge.label), card);
+    badgeLabel->setStyleSheet(
+        QStringLiteral(
+            "background:%1; color:%2; border-radius:4px;"
+            "padding:2px 8px; font-size:8pt; font-weight:bold;")
+            .arg(QLatin1String(badge.bg), QLatin1String(badge.fg)));
+    badgeLabel->setFixedHeight(20);
 
-    QLabel *descLabel = new QLabel(desc);
-    descLabel->setStyleSheet("color:#888; font-size:9pt;");
-    descLabel->setWordWrap(false);
+    titleRow->addWidget(nameLabel);
+    titleRow->addWidget(badgeLabel);
+    titleRow->addStretch(1);
 
-    textCol->addWidget(nameLabel);
-    textCol->addWidget(infoLabel);
-    textCol->addWidget(descLabel);
+    // 第二行：版本 / 发布者
+    const QString meta = QStringLiteral("版本 %1   ·   发布者 %2")
+                             .arg(version.isEmpty() ? QStringLiteral("—") : version,
+                                  publisher.isEmpty() ? QStringLiteral("—") : publisher);
+    auto *infoLabel = new QLabel(meta, card);
+    infoLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-size:8.5pt;")
+            .arg(QLatin1String(Theme::kTextSecondary)));
 
-    card->addLayout(textCol, 1);
+    // 第三行：描述
+    auto *descLabel = new QLabel(description, card);
+    descLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-size:8.5pt;")
+            .arg(QLatin1String(Theme::kTextMuted)));
 
-    // 右侧按钮
-    QPushButton *btn = new QPushButton;
-    btn->setMinimumWidth(96);
-    btn->setMinimumHeight(34);
+    // 第四行：安装状态文字
+    auto *stageLabel = new QLabel(QString(), card);
+    stageLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-size:8.5pt;")
+            .arg(QLatin1String(Theme::kPrimary)));
 
-    if (status == "installing") {
-        btn->setText("安装中...");
-        btn->setEnabled(false);
-    } else if (status == "done") {
-        btn->setText("已安装");
-    } else if (status == "failed") {
-        btn->setText("重试");
-    } else {
-        btn->setText("安装");
-    }
+    // 第五行：进度条
+    auto *progress = new QProgressBar(card);
+    progress->setRange(0, 100);
+    progress->setTextVisible(false);
+    progress->setFixedHeight(4);
+    progress->setVisible(false);
 
-    btn->setStyleSheet(
-        "QPushButton {"
-        "   background:#2b7a2b; color:white;"
-        "   border:none; border-radius:4px;"
-        "   padding:6px 16px; font-weight:bold;"
-        "}"
-        "QPushButton:hover { background:#359035; }"
-        "QPushButton:pressed { background:#1f5a1f; }"
-        "QPushButton:disabled { background:#aaaaaa; }");
+    textColumn->addLayout(titleRow);
+    textColumn->addWidget(infoLabel);
+    textColumn->addWidget(descLabel);
+    textColumn->addWidget(stageLabel);
+    textColumn->addWidget(progress);
 
-    connect(btn, &QPushButton::clicked, this, [this, itemId]() {
-        onInstallButtonClicked(itemId);
-    });
+    cardLayout->addLayout(textColumn, 1);
 
-    card->addWidget(btn, 0, Qt::AlignVCenter);
+    // ---------------- 右侧按钮 ----------------
+    auto *button = new QPushButton(statusTextFor(status), card);
+    button->setFixedSize(Theme::kButtonWidth, Theme::kButtonHeight);
+    button->setCursor(Qt::PointingHandCursor);
+    button->setStyleSheet(
+        status == QLatin1String(InstallItemModel::kStatusFailed)
+            ? Theme::retryButtonStyle()
+            : Theme::installButtonStyle());
+    button->setEnabled(status != QLatin1String(InstallItemModel::kStatusInstalling)
+                       && !m_im->isBusy());
 
-    // ---------------- 悬停详情（tooltip） ----------------
-    const QString tip = QString(
-        "<b>%1</b><br/>"
-        "版本: %2<br/>"
-        "发布者: %3<br/>"
-        "类型: %4<br/><br/>"
-        "%5")
-        .arg(name.toHtmlEscaped(),
-             version.toHtmlEscaped(),
-             publisher.toHtmlEscaped(),
-             type.toHtmlEscaped(),
-             desc.toHtmlEscaped());
+    connect(button, &QPushButton::clicked, this,
+            [this, itemId]() { onInstallButtonClicked(itemId); });
 
-    frame->setToolTip(tip);
+    cardLayout->addWidget(button, 0, Qt::AlignVCenter);
+
+    // ---------------- 悬停详情 ----------------
+    const QString tip = QStringLiteral(
+                            "<b>%1</b><br/>"
+                            "版本：%2<br/>"
+                            "发布者：%3<br/>"
+                            "类型：%4<br/>"
+                            "标识：%5<br/><br/>%6")
+                            .arg(name.toHtmlEscaped(),
+                                 version.toHtmlEscaped(),
+                                 publisher.toHtmlEscaped(),
+                                 type.toHtmlEscaped(),
+                                 itemId.toHtmlEscaped(),
+                                 description.toHtmlEscaped());
+    card->setToolTip(tip);
     row->setToolTip(tip);
+
+    // ---------------- 登记控件，供原地刷新 ----------------
+    if (!itemId.isEmpty()) {
+        if (status == QLatin1String(InstallItemModel::kStatusInstalling)) {
+            progress->setVisible(true);
+            stageLabel->setText(QStringLiteral("正在安装..."));
+        } else if (status == QLatin1String(InstallItemModel::kStatusDone)) {
+            stageLabel->setText(QStringLiteral("✓ 安装完成"));
+            stageLabel->setStyleSheet(
+                QStringLiteral("color:%1; font-size:8.5pt;")
+                    .arg(QLatin1String(Theme::kSuccess)));
+        } else if (status == QLatin1String(InstallItemModel::kStatusFailed)) {
+            stageLabel->setText(QStringLiteral("✗ 上次安装失败"));
+            stageLabel->setStyleSheet(
+                QStringLiteral("color:%1; font-size:8.5pt;")
+                    .arg(QLatin1String(Theme::kDanger)));
+        }
+
+        RowWidgets widgets;
+        widgets.button     = button;
+        widgets.stageLabel = stageLabel;
+        widgets.progress   = progress;
+        m_rowWidgets.insert(itemId, widgets);
+    }
 
     return row;
 }
