@@ -11,60 +11,72 @@
 #include "InstallItemModel.h"
 #include "Logger.h"
 #include "MainWindow.h"
+#include "PgConfig.h"
 #include "TIHelperWrapper.h"
 #include "Theme.h"
 #include "TreeModel.h"
 
 namespace {
 
-/// 解析命令行：--ftp / --http / --config <路径>
+/// 解析命令行：--json / --pg / --config <路径> / --pg-conn <连接串>
 struct StartupOptions {
-    QString configFile = QStringLiteral("config/config_ftp.json");
-    QString serverType = QStringLiteral("ftp");
+    ConfigManager::ConfigSource source = ConfigManager::ConfigSource::JsonFile;
+    QString jsonFile = ConfigManager::defaultJsonConfigPath();
+    QString pgConnection;             ///< 为空表示用 config/config_pg.json / 内置默认
 };
 
 StartupOptions parseCommandLine(QApplication &app)
 {
     QCommandLineParser parser;
     parser.setApplicationDescription(
-        QStringLiteral("czl_installer —— 软件安装管理器"));
+        QStringLiteral("czl_installer —— 软件安装管理器\n"
+                       "模式一：JSON 配置文件 + FTP 软件存储\n"
+                       "模式二：PostgreSQL 数据库 + HTTP 软件存储（由 Web 管理端维护）"));
     parser.addHelpOption();
     parser.addVersionOption();
 
-    const QCommandLineOption httpOption(
-        QStringList{QStringLiteral("http")},
-        QStringLiteral("使用 config/config_http.json 作为配置来源"));
-    const QCommandLineOption ftpOption(
-        QStringList{QStringLiteral("ftp")},
-        QStringLiteral("使用 config/config_ftp.json 作为配置来源（默认）"));
+    const QCommandLineOption jsonOption(
+        QStringList{QStringLiteral("json"), QStringLiteral("ftp")},
+        QStringLiteral("模式一：使用 JSON 配置文件（默认 config/config_ftp.json）"));
+    const QCommandLineOption pgOption(
+        QStringList{QStringLiteral("pg"), QStringLiteral("postgresql")},
+        QStringLiteral("模式二：使用 PostgreSQL 数据库 + HTTP 下载"));
     const QCommandLineOption configOption(
         QStringList{QStringLiteral("c"), QStringLiteral("config")},
-        QStringLiteral("显式指定配置文件路径"),
+        QStringLiteral("显式指定 JSON 配置文件路径（隐含模式一）"),
         QStringLiteral("path"));
+    const QCommandLineOption pgConnOption(
+        QStringList{QStringLiteral("pg-conn")},
+        QStringLiteral("PostgreSQL 连接串，支持四种写法：\n"
+                       "  postgresql://alice:alice123@192.168.1.1:5432/czl_installer\n"
+                       "  host=192.168.1.1 port=5432 user=alice password=alice123 dbname=czl_installer\n"
+                       "  192.168.1.1:5432,alice,alice123,czl_installer\n"
+                       "  192.168.1.1"),
+        QStringLiteral("conn"));
 
-    parser.addOption(httpOption);
-    parser.addOption(ftpOption);
+    parser.addOption(jsonOption);
+    parser.addOption(pgOption);
     parser.addOption(configOption);
+    parser.addOption(pgConnOption);
     parser.process(app);
 
     StartupOptions options;
 
-    // 显式 --config 优先级最高
-    if (parser.isSet(configOption)) {
-        options.configFile = parser.value(configOption);
-        options.serverType = options.configFile.contains(QLatin1String("http"),
-                                                         Qt::CaseInsensitive)
-                                 ? QStringLiteral("http")
-                                 : QStringLiteral("ftp");
-        return options;
+    if (parser.isSet(pgOption)) {
+        options.source = ConfigManager::ConfigSource::PostgreSQL;
+    } else if (parser.isSet(jsonOption)) {
+        options.source = ConfigManager::ConfigSource::JsonFile;
     }
 
-    if (parser.isSet(httpOption)) {
-        options.configFile = QStringLiteral("config/config_http.json");
-        options.serverType = QStringLiteral("http");
-    } else if (parser.isSet(ftpOption)) {
-        options.configFile = QStringLiteral("config/config_ftp.json");
-        options.serverType = QStringLiteral("ftp");
+    // 显式 --config 优先级高于 --pg：给了 JSON 文件就按模式一跑
+    if (parser.isSet(configOption)) {
+        options.jsonFile = parser.value(configOption);
+        options.source = ConfigManager::ConfigSource::JsonFile;
+    }
+
+    if (parser.isSet(pgConnOption)) {
+        options.pgConnection = parser.value(pgConnOption);
+        options.source = ConfigManager::ConfigSource::PostgreSQL;
     }
 
     return options;
@@ -78,7 +90,7 @@ int main(int argc, char *argv[])
 
     // Qt 6.12：QApplication 的元数据应通过这几个 setter 设置。
     QCoreApplication::setApplicationName(QStringLiteral("czl_installer"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("2.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("3.0"));
     QCoreApplication::setOrganizationName(QStringLiteral("CZL"));
     QCoreApplication::setOrganizationDomain(QStringLiteral("czl.local"));
 
@@ -91,28 +103,38 @@ int main(int argc, char *argv[])
     QApplication::setEffectEnabled(Qt::UI_AnimateCombo, true);
     app.setStyleSheet(Theme::globalStyleSheet());
 
-    // ---------- 1. 配置（只加载一次） ----------
-    //   旧版在这里加载一次、随后又调用 configManager.loadConfig() 一次，
-    //   第二次的返回值还被忽略了；更严重的是 --http 分支解析出的配置
-    //   从未同步给 DownloadManager，树和下载用的是两套不同的服务器。
+    // ---------- 1. 配置 ----------
+    //   两种来源产出的数据结构完全一致，后续所有组件都不需要区分。
+    //   ConfigManager::setSource() 内部已实现优先级：
+    //     命令行连接串 > config/config_pg.json > 内置默认（192.168.1.1:5432）
     ConfigManager configManager;
 
-    const bool loaded = configManager.loadConfig(options.configFile);
+    const bool loaded =
+        configManager.setSource(options.source, options.pgConnection);
 
     // ---------- 2. 日志系统（依赖 localBaseDir） ----------
     Logger::instance().init(configManager.localBaseDir());
 
     if (!loaded) {
+        const QString origin =
+            (options.source == ConfigManager::ConfigSource::PostgreSQL)
+                ? QStringLiteral("PostgreSQL（--pg-conn 或 config/config_pg.json）")
+                : ConfigManager::resolvePath(options.jsonFile);
+
         const QString detail = QStringLiteral("初始配置加载失败:\n%1\n\n%2")
-                                   .arg(ConfigManager::resolvePath(options.configFile),
-                                        configManager.lastError());
+                                   .arg(origin, configManager.lastError());
         Logger::error(detail);
         QMessageBox::warning(nullptr, QStringLiteral("配置错误"), detail);
     }
 
-    Logger::info(QStringLiteral("配置文件: %1").arg(configManager.configFilePath()));
+    Logger::info(QStringLiteral("配置来源: %1").arg(
+        configManager.currentSource() == ConfigManager::ConfigSource::PostgreSQL
+            ? QStringLiteral("PostgreSQL 数据库 + HTTP 下载")
+            : QStringLiteral("JSON 配置文件 + FTP 下载")));
+    Logger::info(QStringLiteral("配置位置: %1").arg(configManager.configFilePath()));
     Logger::info(QStringLiteral("本地缓存目录: %1").arg(configManager.localBaseDir()));
-    Logger::info(QStringLiteral("启动参数: --%1").arg(options.serverType));
+    for (const QString &warning : configManager.warnings())
+        Logger::warn(warning);
 
     // ---------- 3. TIHelper.dll ----------
     if (!TIHelperWrapper::instance().load()) {

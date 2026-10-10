@@ -1,0 +1,22 @@
+{
+  "_comment_1": "模式二（PostgreSQL 配置 + HTTP 软件存储）的连接参数。",
+  "_comment_2": "安装器启动加 --pg 即用本文件；加 --pg-conn <连接串> 可临时覆盖。",
+  "_comment_3": "connectionString 支持四种写法（见文件末尾示例）。",
+  "_comment_4": "注意：数据库里 czl_servers 表的 type 应为 http，base_url 指向 nginx 暴露的软件包下载根路径。",
+
+  "connectionString": "192.168.1.1:5432,alice,alice123,czl_installer",
+
+  "host": "192.168.1.1",
+  "port": 5432,
+  "database": "czl_installer",
+  "user": "alice",
+  "password": "alice123",
+  "connectTimeout": 8,
+
+  "_examples": [
+    "postgresql://alice:alice123@192.168.1.1:5432/czl_installer",
+    "host=192.168.1.1 port=5432 user=alice password=alice123 dbname=czl_installer",
+    "192.168.1.1:5432,alice,alice123,czl_installer",
+    "192.168.1.1"
+  ]
+}

@@ -43,40 +43,80 @@ QString InstallManager::activeServerName() const
                                         : QString();
 }
 
-QString InstallManager::configFileForType(const QString &type)
+ConfigManager::ConfigSource InstallManager::currentSource() const
 {
-    return (type == QLatin1String("http"))
-               ? QStringLiteral("config/config_http.json")
-               : QStringLiteral("config/config_ftp.json");
+    return m_config != nullptr ? m_config->currentSource()
+                               : ConfigManager::ConfigSource::JsonFile;
 }
 
 // ===========================================================================
-// 配置切换
+// 配置来源切换
 // ===========================================================================
-void InstallManager::setServerType(const QString &type)
+bool InstallManager::setConfigSource(ConfigManager::ConfigSource source)
 {
-    const QString normalized = type.trimmed().toLower();
-    if (normalized != QLatin1String("ftp") && normalized != QLatin1String("http")) {
-        Logger::warn(QStringLiteral("未知的服务器类型: %1").arg(type));
-        return;
+    if (m_config == nullptr) {
+        emit sourceChanged(QString(), false, QStringLiteral("内部错误：配置未注入"));
+        return false;
     }
 
-    Logger::info(QStringLiteral("切换服务器方式为: %1").arg(normalized));
+    if (isBusy()) {
+        emit sourceChanged(m_config->sourceDescription(), false,
+                           QStringLiteral("正在安装，暂不能切换配置来源"));
+        return false;
+    }
 
-    if (m_config == nullptr)
-        return;
+    const QString wanted = (source == ConfigManager::ConfigSource::PostgreSQL)
+                               ? QStringLiteral("PostgreSQL 数据库 · HTTP 下载")
+                               : QStringLiteral("JSON 配置文件 · FTP 下载");
+    Logger::info(QStringLiteral("切换配置来源为: %1").arg(wanted));
 
-    if (!m_config->loadConfig(configFileForType(normalized)))
-        return;
-
-    m_currentServerType = normalized;
+    if (!m_config->setSource(source)) {
+        const QString detail = m_config->lastError().isEmpty()
+                                   ? QStringLiteral("未知原因")
+                                   : m_config->lastError();
+        Logger::error(QStringLiteral("切换配置来源失败: %1").arg(detail));
+        emit sourceChanged(m_config->sourceDescription(), false,
+                           QStringLiteral("切换到「%1」失败：%2").arg(wanted, detail));
+        return false;
+    }
 
     if (m_downloadManager != nullptr) {
-        // 切换配置后旧的活动服务器索引不再有效
+        // 换了来源，旧的活动服务器索引不再有效
         m_downloadManager->setServers(m_config->servers());
     }
 
+    for (const QString &warning : m_config->warnings())
+        Logger::warn(warning);
+
     emit activeServerChanged();
+    emit sourceChanged(m_config->sourceDescription(), true,
+                       QStringLiteral("已切换到「%1」").arg(wanted));
+    return true;
+}
+
+bool InstallManager::setServerType(const QString &type)
+{
+    const QString normalized = type.trimmed().toLower();
+
+    if (normalized == QLatin1String("pg") || normalized == QLatin1String("pgsql")
+        || normalized == QLatin1String("postgres")
+        || normalized == QLatin1String("postgresql"))
+        return setConfigSource(ConfigManager::ConfigSource::PostgreSQL);
+
+    if (normalized == QLatin1String("json") || normalized == QLatin1String("ftp")
+        || normalized == QLatin1String("http"))
+        return setConfigSource(ConfigManager::ConfigSource::JsonFile);
+
+    Logger::warn(QStringLiteral("未知的配置来源: %1").arg(type));
+    emit sourceChanged(m_config != nullptr ? m_config->sourceDescription() : QString(),
+                       false,
+                       QStringLiteral("未知的配置来源: %1").arg(type));
+    return false;
+}
+
+bool InstallManager::reloadConfig()
+{
+    return setConfigSource(currentSource());
 }
 
 // ===========================================================================

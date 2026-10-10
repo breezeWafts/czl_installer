@@ -13,6 +13,7 @@
 #include <QPixmap>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTimer>
@@ -91,6 +92,15 @@ MainWindow::MainWindow(ConfigManager *config,
     applyWindowIcon();
     setupUi();
     setupConnections();
+
+    // 启动时下拉框必须反映真实的配置来源（启动参数可能就是 --pg）
+    {
+        const QSignalBlocker blocker(m_serverTypeCombo);
+        m_serverTypeCombo->setCurrentIndex(
+            m_config->currentSource() == ConfigManager::ConfigSource::PostgreSQL
+                ? 1
+                : 0);
+    }
 
     // 初始状态：载入类别树并选中第一项，列表不为空
     m_treeModel->reload();
@@ -205,14 +215,22 @@ void MainWindow::setupUi()
         QStringLiteral("color:%1;").arg(QLatin1String(Theme::kTextSecondary)));
 
     m_serverTypeCombo = new QComboBox(toolbar);
-    m_serverTypeCombo->addItem(QStringLiteral("FTP · 多地址备选"));
-    m_serverTypeCombo->addItem(QStringLiteral("HTTP · 多地址备选"));
-    m_serverTypeCombo->setMinimumWidth(190);
+    m_serverTypeCombo->addItem(QStringLiteral("JSON · FTP 存储"));
+    m_serverTypeCombo->addItem(QStringLiteral("PostgreSQL · HTTP 存储"));
+    m_serverTypeCombo->setMinimumWidth(210);
     m_serverTypeCombo->setToolTip(
-        QStringLiteral("切换 config/config_ftp.json 或 config/config_http.json"));
+        QStringLiteral("模式一：config/config_ftp.json + FTP 软件包目录\n"
+                       "模式二：PostgreSQL 数据库（czl_* 表）+ HTTP 网络服务器路径"));
+
+    m_reloadConfigBtn = new QPushButton(QStringLiteral("刷新配置"), toolbar);
+    m_reloadConfigBtn->setMinimumHeight(26);
+    m_reloadConfigBtn->setToolTip(
+        QStringLiteral("按当前来源重新加载配置（Web 管理端改完后点这里）"));
+    m_reloadConfigBtn->setStyleSheet(Theme::primaryButtonStyle());
 
     toolbarLayout->addWidget(serverLabel);
     toolbarLayout->addWidget(m_serverTypeCombo);
+    toolbarLayout->addWidget(m_reloadConfigBtn);
     toolbarLayout->addStretch(1);
 
     // 右侧：当前服务器状态胶囊
@@ -322,6 +340,9 @@ void MainWindow::setupConnections()
     connect(m_serverTypeCombo, &QComboBox::currentIndexChanged,
             this, &MainWindow::onServerTypeChanged);
 
+    connect(m_reloadConfigBtn, &QPushButton::clicked,
+            this, &MainWindow::onReloadConfigClicked);
+
     connect(m_treeView->selectionModel(), &QItemSelectionModel::currentChanged,
             this, &MainWindow::onTreeCurrentChanged);
 
@@ -337,6 +358,8 @@ void MainWindow::setupConnections()
             this, &MainWindow::onInstallFinished);
     connect(m_im, &InstallManager::activeServerChanged,
             this, &MainWindow::onActiveServerChanged);
+    connect(m_im, &InstallManager::sourceChanged,
+            this, &MainWindow::onSourceChanged);
     connect(m_im, &InstallManager::busyChanged,
             this, &MainWindow::onBusyChanged);
 }
@@ -349,10 +372,55 @@ void MainWindow::onServerTypeChanged(int index)
     if (index < 0)
         return;
 
-    const QString type = (index == 0) ? QStringLiteral("ftp")
-                                      : QStringLiteral("http");
-    m_im->setServerType(type);
+    // 索引 -> 配置来源。模式一（JSON + FTP）/ 模式二（PG + HTTP）。
+    const ConfigManager::ConfigSource source =
+        (index == 1) ? ConfigManager::ConfigSource::PostgreSQL
+                     : ConfigManager::ConfigSource::JsonFile;
 
+    if (source == m_config->currentSource()) {
+        // 只是界面上重复选中，不触发加载
+        return;
+    }
+
+    if (!m_im->setConfigSource(source)) {
+        // 切换失败：把下拉框拨回真实来源，避免界面与数据不一致
+        const QSignalBlocker blocker(m_serverTypeCombo);
+        m_serverTypeCombo->setCurrentIndex(
+            m_config->currentSource() == ConfigManager::ConfigSource::PostgreSQL ? 1 : 0);
+        return;
+    }
+
+    refreshAfterConfigReload();
+}
+
+void MainWindow::onReloadConfigClicked()
+{
+    if (!m_im->reloadConfig())
+        return;
+
+    refreshAfterConfigReload();
+}
+
+void MainWindow::onSourceChanged(const QString &description, bool ok,
+                                 const QString &message)
+{
+    Q_UNUSED(description)
+
+    if (!message.isEmpty())
+        setStatus(message, Theme::statusColor(ok));
+    if (message.isEmpty())
+        return;
+
+    m_statusTimer->start();
+
+    // 同步下拉框（切换可能由 InstallManager 内部触发）
+    const QSignalBlocker blocker(m_serverTypeCombo);
+    m_serverTypeCombo->setCurrentIndex(
+        m_config->currentSource() == ConfigManager::ConfigSource::PostgreSQL ? 1 : 0);
+}
+
+void MainWindow::refreshAfterConfigReload()
+{
     m_treeModel->reload();
     m_treeView->expandAll();
 
@@ -367,6 +435,7 @@ void MainWindow::onServerTypeChanged(int index)
     m_localDirLabel->setText(
         QStringLiteral("缓存目录 %1").arg(m_config->localBaseDir()));
     m_localDirLabel->setToolTip(m_config->localBaseDir());
+
     onActiveServerChanged();
 }
 
@@ -436,6 +505,7 @@ void MainWindow::onInstallFinished(const QString &itemId, bool success,
 void MainWindow::onBusyChanged(bool busy)
 {
     m_serverTypeCombo->setEnabled(!busy);
+    m_reloadConfigBtn->setEnabled(!busy);
     m_setBookmarksBtn->setEnabled(!busy);
 
     for (auto it = m_rowWidgets.begin(); it != m_rowWidgets.end(); ++it) {

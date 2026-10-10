@@ -7,6 +7,7 @@
 #include "TIHelperWrapper.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QEventLoop>
 #include <QFile>
@@ -57,6 +58,72 @@ void InstallWorker::emitProgress(const QString &stage, int percent)
 QString InstallWorker::resolveLocal(const QString &relativePath) const
 {
     return DownloadManager::resolveLocalPath(m_localBaseDir, relativePath);
+}
+
+// ===========================================================================
+// 校验和
+// ===========================================================================
+QString InstallWorker::computeSha256(const QString &localPath)
+{
+    QFile file(localPath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        Logger::error(QStringLiteral("无法读取待校验文件: %1 (%2)")
+                          .arg(localPath, file.errorString()));
+        return {};
+    }
+
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    // 分块读取：安装包动辄几百 MB 到几 GB，一次性 readAll() 会吃掉大量内存。
+    constexpr qint64 kChunkSize = 1 << 20;   // 1 MiB
+    while (!file.atEnd()) {
+        const QByteArray chunk = file.read(kChunkSize);
+        if (chunk.isEmpty() && file.error() != QFile::NoError) {
+            Logger::error(QStringLiteral("读取文件失败: %1 (%2)")
+                              .arg(localPath, file.errorString()));
+            return {};
+        }
+        hash.addData(chunk);
+    }
+    file.close();
+
+    return QString::fromLatin1(hash.result().toHex());
+}
+
+bool InstallWorker::verifyDownloadedFile(const QString &localPath) const
+{
+    const QString expected = m_item.sha256.trimmed().toLower();
+    if (expected.isEmpty())
+        return true;               // 未提供校验和：跳过校验
+
+    const QFileInfo info(localPath);
+    if (!info.exists() || !info.isFile()) {
+        Logger::error(QStringLiteral("校验失败：文件不存在 %1").arg(localPath));
+        return false;
+    }
+
+    // 大小先比一次，省掉大文件的完整哈希计算
+    if (m_item.fileSize > 0 && info.size() != m_item.fileSize) {
+        Logger::error(QStringLiteral("校验失败：文件大小不符 %1（期望 %2，实际 %3）")
+                          .arg(localPath)
+                          .arg(m_item.fileSize)
+                          .arg(info.size()));
+        return false;
+    }
+
+    const QString actual = computeSha256(localPath);
+    if (actual.isEmpty())
+        return false;
+
+    if (actual != expected) {
+        Logger::error(QStringLiteral("校验失败：SHA-256 不匹配 %1\n  期望 %2\n  实际 %3")
+                          .arg(localPath, expected, actual));
+        // 删掉坏包，避免下次误用
+        QFile::remove(localPath);
+        return false;
+    }
+
+    Logger::info(QStringLiteral("SHA-256 校验通过: %1").arg(localPath));
+    return true;
 }
 
 // ===========================================================================
@@ -277,10 +344,6 @@ bool InstallWorker::downloadOneFile(const QString &remotePath,
         const int index = (m_activeIndex + attempt) % total;
         const ServerConfig &server = m_servers.at(index);
 
-        const QUrl url = DownloadManager::buildUrl(remotePath, server);
-        QNetworkRequest request(url);
-        DownloadManager::applyServerToRequest(request, server, 300000);
-
         const QString nativeLocal = QDir::toNativeSeparators(localPath);
         if (!QDir().mkpath(QFileInfo(nativeLocal).absolutePath())) {
             Logger::error(QStringLiteral("无法创建下载目录: %1")
@@ -290,16 +353,63 @@ bool InstallWorker::downloadOneFile(const QString &remotePath,
 
         // 先写 .part，成功后再改名，避免半截文件被当成成品
         const QString partPath = nativeLocal + QStringLiteral(".part");
-        QFile::remove(partPath);
+
+        // ★ 每换一台服务器就丢掉旧片段：不同镜像上的同名文件不保证字节一致，
+        //   混着续传会拼出一个「大小对、内容错」的包（SHA-256 能查出来，
+        //   但白费一整次下载）。只有同一台服务器重试时才走续传。
+        if (attempt > 0)
+            QFile::remove(partPath);
+
+        // ★ 断点续传（模式二的 HTTP 服务器普遍支持 Range）：
+        //   上次中断留下的 .part 不再直接删掉，而是按已有字节数发 Range 请求续传。
+        //   FTP 与不支持 Range 的服务器会返回 200，此时按「从头开始」处理，
+        //   逻辑上不会出错，只是白重下一遍。
+        qint64 resumeOffset = 0;
+        {
+            const QFileInfo partInfo(partPath);
+            if (partInfo.exists() && partInfo.isFile() && partInfo.size() > 0)
+                resumeOffset = partInfo.size();
+        }
+
+        const QUrl url = DownloadManager::buildUrl(remotePath, server);
+        QNetworkRequest request(url);
+        DownloadManager::applyServerToRequest(request, server, 300000);
+        if (resumeOffset > 0) {
+            request.setRawHeader(QByteArrayLiteral("Range"),
+                                 QByteArrayLiteral("bytes=")
+                                     + QByteArray::number(resumeOffset) + "-");
+        }
 
         QFile file(partPath);
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        const QIODevice::OpenMode openMode =
+            (resumeOffset > 0) ? (QIODevice::WriteOnly | QIODevice::Append)
+                               : (QIODevice::WriteOnly | QIODevice::Truncate);
+        if (!file.open(openMode)) {
             Logger::error(QStringLiteral("无法创建本地文件: %1 (%2)")
                               .arg(partPath, file.errorString()));
             return false;
         }
 
         QNetworkReply *reply = m_nam->get(request);
+
+        // ★ 关键：续传请求返回 206 时才是追加；返回 200 说明服务器
+        //   忽略了 Range，此时必须截断文件重新写，否则会把整份内容
+        //   追加在旧片段后面，得到一个大而全的坏包。
+        bool appendMode = (resumeOffset > 0);
+        QObject::connect(reply, &QNetworkReply::metaDataChanged, this,
+                         [&appendMode, &file, reply]() {
+            if (!appendMode)
+                return;
+            const int status =
+                reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            if (status == 200) {
+                appendMode = false;
+                file.resize(0);
+                file.seek(0);
+                Logger::warn(QStringLiteral(
+                    "服务器不支持断点续传（返回 200），已从头重新下载"));
+            }
+        });
 
         QEventLoop loop;
         QTimer timer;
@@ -316,6 +426,16 @@ bool InstallWorker::downloadOneFile(const QString &remotePath,
         if (timedOut) {
             QObject::disconnect(reply, nullptr, &loop, nullptr);
             reply->abort();
+
+            // 超时不删 .part：下次可以接着传（这是续传的意义所在）
+            file.write(reply->readAll());
+            file.close();
+            reply->deleteLater();
+
+            Logger::warn(QStringLiteral("下载超时 [%1]: %2（已保留 %3 字节用于续传）")
+                             .arg(server.name, remotePath)
+                             .arg(QFileInfo(partPath).size()));
+            continue;
         }
 
         const auto error = reply->error();
@@ -332,8 +452,24 @@ bool InstallWorker::downloadOneFile(const QString &remotePath,
                 return false;
             }
 
-            Logger::info(QStringLiteral("下载成功 [%1]: %2")
-                             .arg(server.name, remotePath));
+            // ★ 模式二（PG + HTTP）：czl_items.sha256 有值时强制校验，
+            //   校验不过就删包换下一个服务器重下，绝不安装被篡改/截断的包。
+            //   只在「本次下载的就是该安装项的主程序包」时校验：
+            //   - 目录型安装项（files 列表）是逐文件下载，sha256 对应的是
+            //     整个包，无法逐个文件比对，因此这种情况跳过；
+            //   - copy_* 的源文件走 allSourcesOk()，m_item.sha256 本身就是空的，
+            //     校验自动跳过（这里的路径比较是额外的保险）。
+            if (remotePath == m_item.remotePath
+                && !verifyDownloadedFile(nativeLocal)) {
+                QFile::remove(nativeLocal);
+                Logger::warn(QStringLiteral("服务器 %1 上的 %2 校验失败，尝试下一个服务器")
+                                 .arg(server.name, remotePath));
+                continue;
+            }
+
+            Logger::info(QStringLiteral("下载成功 [%1]: %2（%3 字节）")
+                             .arg(server.name, remotePath)
+                             .arg(QFileInfo(nativeLocal).size()));
             if (index != m_activeIndex) {
                 m_activeIndex = index;
                 emit serverChanged(index, server.name);
@@ -346,10 +482,14 @@ bool InstallWorker::downloadOneFile(const QString &remotePath,
                                       : reply->errorString();
         file.close();
         reply->deleteLater();
-        QFile::remove(partPath);
 
-        Logger::warn(QStringLiteral("下载失败 [%1]: %2 - %3")
-                         .arg(server.name, remotePath, errorText));
+        // 故意保留 .part：超时/连接中断时下次可以续传；
+        // 若服务器忽略了 Range（返回 200），下次请求会走「截断重写」分支，
+        // 因此保留旧片段不会造成坏包。只有校验失败才会主动删除成品文件。
+
+        Logger::warn(QStringLiteral("下载失败 [%1]: %2 - %3（已保留 %4 字节用于续传）")
+                         .arg(server.name, remotePath, errorText)
+                         .arg(QFileInfo(partPath).size()));
     }
 
     return false;

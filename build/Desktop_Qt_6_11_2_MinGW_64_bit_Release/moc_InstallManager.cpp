@@ -51,9 +51,17 @@ template <> constexpr inline auto InstallManager::qt_create_metaobjectdata<qt_me
         "activeServerChanged",
         "busyChanged",
         "busy",
+        "sourceChanged",
+        "description",
+        "ok",
         "installItem",
+        "setConfigSource",
+        "ConfigManager::ConfigSource",
+        "source",
         "setServerType",
         "type",
+        "reloadConfig",
+        "currentSource",
         "activeServerName"
     };
 
@@ -76,18 +84,30 @@ template <> constexpr inline auto InstallManager::qt_create_metaobjectdata<qt_me
         QtMocHelpers::SignalData<void(bool)>(11, 2, QMC::AccessPublic, QMetaType::Void, {{
             { QMetaType::Bool, 12 },
         }}),
+        // Signal 'sourceChanged'
+        QtMocHelpers::SignalData<void(const QString &, bool, const QString &)>(13, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { QMetaType::QString, 14 }, { QMetaType::Bool, 15 }, { QMetaType::QString, 9 },
+        }}),
         // Slot 'installItem'
-        QtMocHelpers::SlotData<void(const QString &)>(13, 2, QMC::AccessPublic, QMetaType::Void, {{
+        QtMocHelpers::SlotData<void(const QString &)>(16, 2, QMC::AccessPublic, QMetaType::Void, {{
             { QMetaType::QString, 3 },
         }}),
-        // Slot 'setServerType'
-        QtMocHelpers::SlotData<void(const QString &)>(14, 2, QMC::AccessPublic, QMetaType::Void, {{
-            { QMetaType::QString, 15 },
+        // Slot 'setConfigSource'
+        QtMocHelpers::SlotData<bool(ConfigManager::ConfigSource)>(17, 2, QMC::AccessPublic, QMetaType::Bool, {{
+            { 0x80000000 | 18, 19 },
         }}),
+        // Slot 'setServerType'
+        QtMocHelpers::SlotData<bool(const QString &)>(20, 2, QMC::AccessPublic, QMetaType::Bool, {{
+            { QMetaType::QString, 21 },
+        }}),
+        // Slot 'reloadConfig'
+        QtMocHelpers::SlotData<bool()>(22, 2, QMC::AccessPublic, QMetaType::Bool),
+        // Slot 'currentSource'
+        QtMocHelpers::SlotData<ConfigManager::ConfigSource() const>(23, 2, QMC::AccessPublic, 0x80000000 | 18),
     };
     QtMocHelpers::UintData qt_properties {
         // property 'activeServerName'
-        QtMocHelpers::PropertyData<QString>(16, QMetaType::QString, QMC::DefaultPropertyFlags, 3),
+        QtMocHelpers::PropertyData<QString>(24, QMetaType::QString, QMC::DefaultPropertyFlags, 3),
         // property 'busy'
         QtMocHelpers::PropertyData<bool>(12, QMetaType::Bool, QMC::DefaultPropertyFlags, 4),
     };
@@ -116,8 +136,16 @@ void InstallManager::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _
         case 2: _t->installFinished((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<bool>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3]))); break;
         case 3: _t->activeServerChanged(); break;
         case 4: _t->busyChanged((*reinterpret_cast<std::add_pointer_t<bool>>(_a[1]))); break;
-        case 5: _t->installItem((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1]))); break;
-        case 6: _t->setServerType((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1]))); break;
+        case 5: _t->sourceChanged((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<bool>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3]))); break;
+        case 6: _t->installItem((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1]))); break;
+        case 7: { bool _r = _t->setConfigSource((*reinterpret_cast<std::add_pointer_t<ConfigManager::ConfigSource>>(_a[1])));
+            if (_a[0]) *reinterpret_cast<bool*>(_a[0]) = std::move(_r); }  break;
+        case 8: { bool _r = _t->setServerType((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1])));
+            if (_a[0]) *reinterpret_cast<bool*>(_a[0]) = std::move(_r); }  break;
+        case 9: { bool _r = _t->reloadConfig();
+            if (_a[0]) *reinterpret_cast<bool*>(_a[0]) = std::move(_r); }  break;
+        case 10: { ConfigManager::ConfigSource _r = _t->currentSource();
+            if (_a[0]) *reinterpret_cast<ConfigManager::ConfigSource*>(_a[0]) = std::move(_r); }  break;
         default: ;
         }
     }
@@ -131,6 +159,8 @@ void InstallManager::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _
         if (QtMocHelpers::indexOfMethod<void (InstallManager::*)()>(_a, &InstallManager::activeServerChanged, 3))
             return;
         if (QtMocHelpers::indexOfMethod<void (InstallManager::*)(bool )>(_a, &InstallManager::busyChanged, 4))
+            return;
+        if (QtMocHelpers::indexOfMethod<void (InstallManager::*)(const QString & , bool , const QString & )>(_a, &InstallManager::sourceChanged, 5))
             return;
     }
     if (_c == QMetaObject::ReadProperty) {
@@ -162,14 +192,14 @@ int InstallManager::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 7)
+        if (_id < 11)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 7;
+        _id -= 11;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 7)
+        if (_id < 11)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 7;
+        _id -= 11;
     }
     if (_c == QMetaObject::ReadProperty || _c == QMetaObject::WriteProperty
             || _c == QMetaObject::ResetProperty || _c == QMetaObject::BindableProperty
@@ -208,5 +238,11 @@ void InstallManager::activeServerChanged()
 void InstallManager::busyChanged(bool _t1)
 {
     QMetaObject::activate<void>(this, &staticMetaObject, 4, nullptr, _t1);
+}
+
+// SIGNAL 5
+void InstallManager::sourceChanged(const QString & _t1, bool _t2, const QString & _t3)
+{
+    QMetaObject::activate<void>(this, &staticMetaObject, 5, nullptr, _t1, _t2, _t3);
 }
 QT_WARNING_POP

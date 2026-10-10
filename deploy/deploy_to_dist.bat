@@ -12,6 +12,10 @@ rem      QT_DIR       Qt kit dir containing bin\windeployqt.exe   (required)
 rem      BUILD_DIR    build output dir (auto-detected when omitted)
 rem      MINGW_DIR    MinGW toolchain bin (fallback for gcc/stdc++ runtime)
 rem      DIST_DIR     output dir, defaults to <project root>\dist
+rem      PGSQL_DIR    PostgreSQL client bin dir (e.g. C:\Program Files\PostgreSQL\18\bin)
+rem                   Needed for MODE 2 (PostgreSQL config + HTTP storage):
+rem                   the Qt QPSQL driver (sqldrivers\qsqlpsql.dll) links
+rem                   against libpq.dll, which Qt does NOT ship.
 rem
 rem  NOTE: this file is intentionally ASCII-only. cmd.exe reads .bat files using
 rem        the system ANSI code page (GBK on Chinese Windows); a UTF-8 .bat with
@@ -21,11 +25,13 @@ rem  Resulting layout:
 rem      dist\
 rem        czl_installer.exe
 rem        TIHelper.dll
-rem        Qt6Core.dll / Qt6Gui.dll / Qt6Widgets.dll / Qt6Network.dll ...
+rem        Qt6Core.dll / Qt6Gui.dll / Qt6Widgets.dll / Qt6Network.dll / Qt6Sql.dll ...
 rem        platforms\qwindows.dll
 rem        styles\ , imageformats\ , tls\ ...
+rem        sqldrivers\qsqlpsql.dll        (mode 2, needs libpq.dll)
 rem        libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll
-rem        config\config_ftp.json / config_http.json
+rem        libpq.dll (+ libssl/libcrypto/libintl/libiconv as required)
+rem        config\config_ftp.json / config_http.json / config_pg.json
 rem ===========================================================================
 setlocal EnableDelayedExpansion
 
@@ -195,11 +201,51 @@ for %%L in (libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll) do (
 )
 
 rem ---------- 7. config files ----------
-echo [5/5] copying config files
+echo [5/7] copying config files
 mkdir "%DIST_DIR%\config" 2>nul
 xcopy /Y /I /E "%ROOT%\config" "%DIST_DIR%\config\" >nul || exit /b 1
 
-rem ---------- 8. verify ----------
+rem ---------- 8. MODE 2: Qt QPSQL driver + libpq ----------
+rem  Qt6Sql.dll is pulled in automatically because the .pro now has "QT += sql".
+rem  The QPSQL *driver plugin* and its libpq dependency are NOT, so handle both.
+echo [6/7] deploying PostgreSQL support (mode 2)
+set "SQLPLUGIN="
+if exist "%QT_DIR%\plugins\sqldrivers\qsqlpsql.dll" set "SQLPLUGIN=%QT_DIR%\plugins\sqldrivers\qsqlpsql.dll"
+if not defined SQLPLUGIN if exist "%QT_DIR%\sqldrivers\qsqlpsql.dll" set "SQLPLUGIN=%QT_DIR%\sqldrivers\qsqlpsql.dll"
+if not defined SQLPLUGIN (
+    echo        [WARN] qsqlpsql.dll not found under "%QT_DIR%".
+    echo               With the official Qt installer it lives in the
+    echo               "Qt 6.x.x > Additional Libraries > Qt PostgreSQL" component.
+    echo               Without it the installer cannot use --pg mode.
+) else (
+    mkdir "%DIST_DIR%\sqldrivers" 2>nul
+    copy /Y "!SQLPLUGIN!" "%DIST_DIR%\sqldrivers\" >nul && echo        sqldrivers\qsqlpsql.dll
+)
+
+rem  libpq and friends must come from a PostgreSQL client installation.
+if "%PGSQL_DIR%"=="" (
+    if exist "C:\Program Files\PostgreSQL\18\bin\libpq.dll" set "PGSQL_DIR=C:\Program Files\PostgreSQL\18\bin"
+)
+if "%PGSQL_DIR%"=="" (
+    if exist "C:\Program Files\PostgreSQL\17\bin\libpq.dll" set "PGSQL_DIR=C:\Program Files\PostgreSQL\17\bin"
+)
+if "%PGSQL_DIR%"=="" (
+    if exist "C:\Program Files\PostgreSQL\16\bin\libpq.dll" set "PGSQL_DIR=C:\Program Files\PostgreSQL\16\bin"
+)
+if not "%PGSQL_DIR%"=="" (
+    for %%L in (libpq.dll libssl-3-x64.dll libcrypto-3-x64.dll libintl-9.dll libiconv-2.dll libwinpthread-1.dll) do (
+        if exist "!PGSQL_DIR!\%%L" (
+            copy /Y "!PGSQL_DIR!\%%L" "%DIST_DIR%\" >nul && echo        %%L
+        )
+    )
+) else (
+    echo        [WARN] libpq.dll not found. Set PGSQL_DIR to your PostgreSQL
+    echo               client bin dir, e.g.
+    echo               set PGSQL_DIR=C:\Program Files\PostgreSQL\18\bin
+    echo               Without libpq.dll the QPSQL driver fails to load.
+)
+
+rem ---------- 9. verify ----------
 echo.
 echo ============================================================
 echo  verifying required files
@@ -215,12 +261,26 @@ for %%F in (
     "%DIST_DIR%\platforms\qwindows.dll"
     "%DIST_DIR%\config\config_ftp.json"
     "%DIST_DIR%\config\config_http.json"
+    "%DIST_DIR%\config\config_pg.json"
 ) do (
     if exist %%F (
         echo   [OK]      %%~nxF
     ) else (
         echo   [MISSING] %%F
         set "MISSING=1"
+    )
+)
+
+rem  Mode-2 optional pieces: report but do not fail the build.
+for %%F in (
+    "%DIST_DIR%\Qt6Sql.dll"
+    "%DIST_DIR%\sqldrivers\qsqlpsql.dll"
+    "%DIST_DIR%\libpq.dll"
+) do (
+    if exist %%F (
+        echo   [OK]      %%~nxF
+    ) else (
+        echo   [OPTIONAL-MISSING] %%F   ^(mode 2 / --pg will not work^)
     )
 )
 
@@ -232,5 +292,7 @@ if "%MISSING%"=="1" (
 
 echo deploy finished: %DIST_DIR%
 echo run it with  : %DIST_DIR%\czl_installer.exe
+echo   mode 1 (JSON + FTP)  : czl_installer.exe
+echo   mode 2 (PG   + HTTP) : czl_installer.exe --pg
 echo.
 endlocal

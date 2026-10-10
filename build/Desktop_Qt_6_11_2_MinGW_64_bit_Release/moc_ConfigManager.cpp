@@ -41,7 +41,10 @@ template <> constexpr inline auto ConfigManager::qt_create_metaobjectdata<qt_met
         "ConfigManager",
         "configChanged",
         "",
-        "localBaseDir"
+        "localBaseDir",
+        "ConfigSource",
+        "JsonFile",
+        "PostgreSQL"
     };
 
     QtMocHelpers::UintData qt_methods {
@@ -53,6 +56,11 @@ template <> constexpr inline auto ConfigManager::qt_create_metaobjectdata<qt_met
         QtMocHelpers::PropertyData<QString>(3, QMetaType::QString, QMC::DefaultPropertyFlags, 0),
     };
     QtMocHelpers::UintData qt_enums {
+        // enum 'ConfigSource'
+        QtMocHelpers::EnumData<enum ConfigSource>(4, 4, QMC::EnumIsScoped).add({
+            {    5, ConfigSource::JsonFile },
+            {    6, ConfigSource::PostgreSQL },
+        }),
     };
     return QtMocHelpers::metaObjectData<ConfigManager, qt_meta_tag_ZN13ConfigManagerE_t>(QMC::MetaObjectFlag{}, qt_stringData,
             qt_methods, qt_properties, qt_enums);

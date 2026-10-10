@@ -42,6 +42,11 @@ template <> constexpr inline auto MainWindow::qt_create_metaobjectdata<qt_meta_t
         "onServerTypeChanged",
         "",
         "index",
+        "onReloadConfigClicked",
+        "onSourceChanged",
+        "description",
+        "ok",
+        "message",
         "onTreeCurrentChanged",
         "QModelIndex",
         "current",
@@ -52,7 +57,6 @@ template <> constexpr inline auto MainWindow::qt_create_metaobjectdata<qt_meta_t
         "stage",
         "onInstallFinished",
         "success",
-        "message",
         "onBusyChanged",
         "busy",
         "onActiveServerChanged",
@@ -65,28 +69,34 @@ template <> constexpr inline auto MainWindow::qt_create_metaobjectdata<qt_meta_t
         QtMocHelpers::SlotData<void(int)>(1, 2, QMC::AccessPrivate, QMetaType::Void, {{
             { QMetaType::Int, 3 },
         }}),
+        // Slot 'onReloadConfigClicked'
+        QtMocHelpers::SlotData<void()>(4, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'onSourceChanged'
+        QtMocHelpers::SlotData<void(const QString &, bool, const QString &)>(5, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::QString, 6 }, { QMetaType::Bool, 7 }, { QMetaType::QString, 8 },
+        }}),
         // Slot 'onTreeCurrentChanged'
-        QtMocHelpers::SlotData<void(const QModelIndex &, const QModelIndex &)>(4, 2, QMC::AccessPrivate, QMetaType::Void, {{
-            { 0x80000000 | 5, 6 }, { 0x80000000 | 5, 7 },
+        QtMocHelpers::SlotData<void(const QModelIndex &, const QModelIndex &)>(9, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { 0x80000000 | 10, 11 }, { 0x80000000 | 10, 12 },
         }}),
         // Slot 'onInstallProgress'
-        QtMocHelpers::SlotData<void(const QString &, int, const QString &)>(8, 2, QMC::AccessPrivate, QMetaType::Void, {{
-            { QMetaType::QString, 9 }, { QMetaType::Int, 10 }, { QMetaType::QString, 11 },
+        QtMocHelpers::SlotData<void(const QString &, int, const QString &)>(13, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::QString, 14 }, { QMetaType::Int, 15 }, { QMetaType::QString, 16 },
         }}),
         // Slot 'onInstallFinished'
-        QtMocHelpers::SlotData<void(const QString &, bool, const QString &)>(12, 2, QMC::AccessPrivate, QMetaType::Void, {{
-            { QMetaType::QString, 9 }, { QMetaType::Bool, 13 }, { QMetaType::QString, 14 },
+        QtMocHelpers::SlotData<void(const QString &, bool, const QString &)>(17, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::QString, 14 }, { QMetaType::Bool, 18 }, { QMetaType::QString, 8 },
         }}),
         // Slot 'onBusyChanged'
-        QtMocHelpers::SlotData<void(bool)>(15, 2, QMC::AccessPrivate, QMetaType::Void, {{
-            { QMetaType::Bool, 16 },
+        QtMocHelpers::SlotData<void(bool)>(19, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::Bool, 20 },
         }}),
         // Slot 'onActiveServerChanged'
-        QtMocHelpers::SlotData<void()>(17, 2, QMC::AccessPrivate, QMetaType::Void),
+        QtMocHelpers::SlotData<void()>(21, 2, QMC::AccessPrivate, QMetaType::Void),
         // Slot 'onResetStatusText'
-        QtMocHelpers::SlotData<void()>(18, 2, QMC::AccessPrivate, QMetaType::Void),
+        QtMocHelpers::SlotData<void()>(22, 2, QMC::AccessPrivate, QMetaType::Void),
         // Slot 'onSetBookmarksClicked'
-        QtMocHelpers::SlotData<void()>(19, 2, QMC::AccessPrivate, QMetaType::Void),
+        QtMocHelpers::SlotData<void()>(23, 2, QMC::AccessPrivate, QMetaType::Void),
     };
     QtMocHelpers::UintData qt_properties {
     };
@@ -111,13 +121,15 @@ void MainWindow::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _id, 
     if (_c == QMetaObject::InvokeMetaMethod) {
         switch (_id) {
         case 0: _t->onServerTypeChanged((*reinterpret_cast<std::add_pointer_t<int>>(_a[1]))); break;
-        case 1: _t->onTreeCurrentChanged((*reinterpret_cast<std::add_pointer_t<QModelIndex>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QModelIndex>>(_a[2]))); break;
-        case 2: _t->onInstallProgress((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<int>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3]))); break;
-        case 3: _t->onInstallFinished((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<bool>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3]))); break;
-        case 4: _t->onBusyChanged((*reinterpret_cast<std::add_pointer_t<bool>>(_a[1]))); break;
-        case 5: _t->onActiveServerChanged(); break;
-        case 6: _t->onResetStatusText(); break;
-        case 7: _t->onSetBookmarksClicked(); break;
+        case 1: _t->onReloadConfigClicked(); break;
+        case 2: _t->onSourceChanged((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<bool>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3]))); break;
+        case 3: _t->onTreeCurrentChanged((*reinterpret_cast<std::add_pointer_t<QModelIndex>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QModelIndex>>(_a[2]))); break;
+        case 4: _t->onInstallProgress((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<int>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3]))); break;
+        case 5: _t->onInstallFinished((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<bool>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3]))); break;
+        case 6: _t->onBusyChanged((*reinterpret_cast<std::add_pointer_t<bool>>(_a[1]))); break;
+        case 7: _t->onActiveServerChanged(); break;
+        case 8: _t->onResetStatusText(); break;
+        case 9: _t->onSetBookmarksClicked(); break;
         default: ;
         }
     }
@@ -142,14 +154,14 @@ int MainWindow::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 8)
+        if (_id < 10)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 8;
+        _id -= 10;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 8)
+        if (_id < 10)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 8;
+        _id -= 10;
     }
     return _id;
 }

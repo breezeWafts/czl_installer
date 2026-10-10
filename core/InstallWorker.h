@@ -74,6 +74,16 @@ private:
     // ---- 辅助 ----
     /// 生成 bat 并交给 TIHelper 执行；返回子进程是否成功。
     bool runScript(const QString &scriptBody, const QString &tag);
+    /**
+     * @brief 校验刚下载的文件（仅在配置提供了 sha256 时生效）。
+     *
+     * 模式二（PostgreSQL + HTTP）下 czl_items.sha256 由 Web 管理端在
+     * 上传软件包时自动写入；模式一的 JSON 配置没有该字段，直接跳过。
+     * 校验失败视为下载失败，会自动切换到下一个备选服务器重下。
+     */
+    bool verifyDownloadedFile(const QString &localPath) const;
+    /// 计算文件的 SHA-256（小写十六进制），读取失败返回空串。
+    static QString computeSha256(const QString &localPath);
     /// 把单个参数按 Windows 命令行规则加引号。
     static QString quoteArgument(const QString &argument);
     static QString joinArguments(const QStringList &arguments);

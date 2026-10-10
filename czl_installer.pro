@@ -7,9 +7,17 @@
 #   * 使用 Qt6 的 QTextStream::setEncoding / QStringConverter 取代已删除的 setCodec；
 #   * _WIN32_WINNT 提升到 0x0601（Win7）并补全 Win32 依赖库；
 #   * 关闭 debug_and_release 双构建，避免 Qt6 下既生成 debug 又生成 release 目标名冲突。
+#
+# 3.0 新增「模式二：PostgreSQL 配置 + HTTP 软件存储」：
+#   * QT += sql —— 使用 Qt 自带的 QPSQL 驱动访问 PostgreSQL，
+#     不引入任何第三方 C++ 数据库库；
+#   * core/PgConfig.* 负责连接串解析，core/DbSource.* 负责把 czl_* 表
+#     读成与 JSON 完全一致的结构体；
+#   * 运行期需要 sqldrivers/qsqlpsql.dll 及其依赖的 libpq.dll
+#     （由 deploy/deploy_to_dist.bat 自动部署，详见 README）。
 # ============================================================================
 
-QT += core gui widgets network
+QT += core gui widgets network sql
 
 CONFIG += c++17
 CONFIG -= debug_and_release debug_and_release_target
@@ -79,11 +87,13 @@ SOURCES += \
     MainWindow.cpp \
     core/BookmarkManager.cpp \
     core/ConfigManager.cpp \
+    core/DbSource.cpp \
     core/DownloadManager.cpp \
     core/FileOperationManager.cpp \
     core/InstallManager.cpp \
     core/InstallWorker.cpp \
     core/Logger.cpp \
+    core/PgConfig.cpp \
     core/ProcessManager.cpp \
     core/TIHelperWrapper.cpp \
     models/InstallItemModel.cpp \
@@ -95,11 +105,13 @@ HEADERS += \
     tihelper.h \
     core/BookmarkManager.h \
     core/ConfigManager.h \
+    core/DbSource.h \
     core/DownloadManager.h \
     core/FileOperationManager.h \
     core/InstallManager.h \
     core/InstallWorker.h \
     core/Logger.h \
+    core/PgConfig.h \
     core/ProcessManager.h \
     core/TIHelperWrapper.h \
     models/InstallItemModel.h \
@@ -114,6 +126,7 @@ DISTFILES += \
     app.qrc \
     config/config_ftp.json \
     config/config_http.json \
+    config/config_pg.json \
     deploy/package.bat \
     deploy/deploy_to_dist.bat \
     tools/make_icon.py

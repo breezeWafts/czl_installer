@@ -1,5 +1,7 @@
 #include "ConfigManager.h"
 
+#include "DbSource.h"
+
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -11,6 +13,7 @@
 #include <QLoggingCategory>
 
 #include <functional>
+#include <utility>
 
 namespace {
 
@@ -20,11 +23,30 @@ QString trimmed(const QString &value)
     return value.trimmed();
 }
 
+/// 模式一默认配置文件。
+const char *const kJsonConfigFile = "config/config_ftp.json";
+/// 模式二的连接参数文件（同一目录，与模式一互不影响）。
+const char *const kPgConfigFile = "config/config_pg.json";
+
 } // namespace
 
 ConfigManager::ConfigManager(QObject *parent)
     : QObject(parent)
 {
+    // 默认连接串与 PgConnectionInfo 的默认值保持一致：
+    // 192.168.1.1:5432 / alice / alice123 / czl_installer
+    m_pgConnectionString = defaultPgConnectionString();
+    m_pgConnection = PgConnectionInfo{};
+}
+
+QString ConfigManager::defaultJsonConfigPath()
+{
+    return QString::fromLatin1(kJsonConfigFile);
+}
+
+QString ConfigManager::defaultPgConnectionString()
+{
+    return ::defaultPgConnectionString();
 }
 
 // ---------------------------------------------------------------------------
@@ -128,23 +150,245 @@ bool ConfigManager::loadConfig(const QString &filePath)
     }
 
     // ---- 全部解析成功后才提交，保证失败时保留上一份可用配置 ----
-    m_servers     = std::move(servers);
-    m_categories  = std::move(categories);
-    m_bookmarks   = std::move(bookmarks);
-    m_configFilePath = resolved;
-
     const QString baseDir = root.value("localBaseDir").toString().trimmed();
-    if (!baseDir.isEmpty())
-        m_localBaseDir = baseDir;
 
-    qInfo() << "配置加载完成:" << resolved
+    commit(/*fromDatabase=*/false,
+           std::move(servers),
+           std::move(categories),
+           std::move(bookmarks),
+           baseDir.isEmpty() ? m_localBaseDir : baseDir,
+           /*httpBaseUrl=*/QString(),
+           resolved,
+           /*warnings=*/{});
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// 模式二：载入连接参数文件 config/config_pg.json
+// ---------------------------------------------------------------------------
+bool ConfigManager::loadPgSettingsFromJson(const QString &filePath,
+                                           QString &connectionOut)
+{
+    connectionOut.clear();
+
+    const QString resolved = resolvePath(filePath);
+    QFile file(resolved);
+    if (!file.open(QIODevice::ReadOnly)) {
+        // 连接参数文件不是必需的：没有就用内置默认值（192.168.1.1:5432）
+        qInfo() << "未找到 PostgreSQL 连接参数文件，使用内置默认连接:"
+                << resolved;
+        return false;
+    }
+
+    const QByteArray data = file.readAll();
+    file.close();
+
+    QJsonParseError parseError{};
+    const QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+        qWarning() << "PostgreSQL 连接参数文件解析失败:" << resolved
+                   << parseError.errorString();
+        return false;
+    }
+
+    const QJsonObject root = doc.object();
+
+    // 兼容两种写法，优先级：拆开的分字段 > connectionString
+    // （分字段更不容易写错，且能被界面逐项展示）
+    PgConnectionInfo info;
+    bool hasSplitFields = false;
+
+    if (root.contains("host")) {
+        info.host = root.value("host").toString().trimmed();
+        hasSplitFields = true;
+    }
+    if (root.contains("port")) {
+        info.port = root.value("port").toInt(info.port);
+        hasSplitFields = true;
+    }
+    if (root.contains("database")) {
+        info.database = root.value("database").toString().trimmed();
+        hasSplitFields = true;
+    }
+    if (root.contains("user")) {
+        info.user = root.value("user").toString().trimmed();
+        hasSplitFields = true;
+    }
+    if (root.contains("password")) {
+        info.password = root.value("password").toString();
+        hasSplitFields = true;
+    }
+    if (root.contains("connectTimeout")) {
+        info.connectTimeout = root.value("connectTimeout").toInt(info.connectTimeout);
+        hasSplitFields = true;
+    }
+
+    if (hasSplitFields && !info.host.isEmpty()) {
+        connectionOut = info.toConnectionString();
+        return true;
+    }
+
+    // 只给一个连接串：语法完全交给 parsePgConnectionString
+    const QString connection = root.value("connectionString").toString().trimmed();
+    if (!connection.isEmpty()) {
+        connectionOut = connection;
+        return true;
+    }
+
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// 模式二：从 PostgreSQL 加载
+// ---------------------------------------------------------------------------
+bool ConfigManager::loadFromPostgres(const QString &connectionString)
+{
+    PgConnectionInfo info = m_pgConnection;   // 保留未在连接串里出现的字段
+    if (!connectionString.trimmed().isEmpty()
+        && !parsePgConnectionString(connectionString, info)) {
+        m_lastError = QStringLiteral("无法解析 PostgreSQL 连接串: %1")
+                          .arg(connectionString);
+        qWarning() << m_lastError;
+        return false;
+    }
+    return loadFromPostgres(info);
+}
+
+bool ConfigManager::loadFromPostgres(const PgConnectionInfo &connection)
+{
+    m_lastError.clear();
+    m_warnings.clear();
+
+    DbSource source(connection);
+    const DbSource::Response response = source.load();
+
+    if (!response.success) {
+        m_lastError = response.errorMessage.isEmpty()
+                          ? QStringLiteral("从 PostgreSQL 读取配置失败（未知原因）")
+                          : response.errorMessage;
+        qWarning() << "PG 配置加载失败:" << m_lastError;
+        return false;
+    }
+
+    for (const QString &warning : response.warnings)
+        qWarning() << "PG 配置提示:" << warning;
+
+    const QString baseDir = response.baseDir.trimmed().isEmpty()
+                                ? m_localBaseDir
+                                : response.baseDir.trimmed();
+
+    commit(/*fromDatabase=*/true,
+           response.servers,
+           response.categories,
+           response.bookmarks,
+           baseDir,
+           response.httpBaseUrl,
+           QStringLiteral("postgresql://%1").arg(connection.describe()),
+           response.warnings);
+
+    // 连接参数只在成功之后才更新，失败时保留上一次可用的
+    m_pgConnection = connection;
+    m_pgConnectionString = connection.toConnectionString();
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// 模式切换
+// ---------------------------------------------------------------------------
+bool ConfigManager::setSource(ConfigSource source, const QString &fromJsonFile)
+{
+    if (source == m_source) {
+        // 同一种来源被再次选中：JSON 模式重新读盘，PG 模式重新查库，
+        // 这样 Web 端改完配置后安装器「刷新」即可生效。
+        // 注意 fromJsonFile 可能是「显式指定的 JSON 路径」或「PG 连接串」，
+        // 两者的含义由 source 决定，不能在这里丢掉。
+        if (source == ConfigSource::PostgreSQL) {
+            return fromJsonFile.trimmed().isEmpty()
+                       ? loadFromPostgres(m_pgConnection)
+                       : loadFromPostgres(fromJsonFile);
+        }
+        return loadConfig(fromJsonFile.trimmed().isEmpty()
+                              ? defaultJsonConfigPath()
+                              : fromJsonFile);
+    }
+
+    // 切换失败时回滚到切换前的来源，绝不处于「半切换」状态
+    // （失败时数据没有被 commit，界面仍是旧数据，来源标记也必须跟着回旧值）。
+    const ConfigSource previous = m_source;
+
+    if (source == ConfigSource::PostgreSQL) {
+        // 连接参数优先级：调用方给的 > config/config_pg.json > 内置默认
+        QString connection;
+        const QString settingsFile = fromJsonFile.trimmed().isEmpty()
+                                         ? QString::fromLatin1(kPgConfigFile)
+                                         : fromJsonFile;
+        loadPgSettingsFromJson(settingsFile, connection);
+        if (connection.trimmed().isEmpty())
+            connection = m_pgConnectionString;
+
+        if (!loadFromPostgres(connection)) {
+            m_source = previous;
+            return false;
+        }
+
+        m_source = ConfigSource::PostgreSQL;
+        return true;
+    }
+
+    // 切回模式一
+    const QString jsonFile = fromJsonFile.trimmed().isEmpty()
+                                 ? defaultJsonConfigPath()
+                                 : fromJsonFile;
+    if (!loadConfig(jsonFile)) {
+        m_source = previous;
+        return false;
+    }
+
+    m_source = ConfigSource::JsonFile;
+    return true;
+}
+
+QString ConfigManager::sourceDescription() const
+{
+    if (m_source == ConfigSource::PostgreSQL)
+        return QStringLiteral("PostgreSQL 数据库 · HTTP 下载")
+               + QLatin1Char('\n') + m_pgConnection.describe();
+    return QStringLiteral("JSON 配置文件 · FTP 下载")
+           + QLatin1Char('\n') + m_configFilePath;
+}
+
+// ---------------------------------------------------------------------------
+// 提交一次成功加载
+// ---------------------------------------------------------------------------
+void ConfigManager::commit(bool fromDatabase,
+                           QList<ServerConfig> servers,
+                           QList<Category> categories,
+                           QList<BookmarkItem> bookmarks,
+                           const QString &localBaseDir,
+                           const QString &httpBaseUrl,
+                           const QString &origin,
+                           const QStringList &warnings)
+{
+    m_servers    = std::move(servers);
+    m_categories = std::move(categories);
+    m_bookmarks  = std::move(bookmarks);
+    m_warnings   = warnings;
+    m_configFilePath = origin;
+    m_httpBaseUrl = fromDatabase ? httpBaseUrl : QString();
+
+    if (!localBaseDir.trimmed().isEmpty())
+        m_localBaseDir = localBaseDir.trimmed();
+
+    qInfo() << "配置加载完成:" << (fromDatabase ? "[PG]" : "[JSON]") << origin
             << "| localBaseDir=" << m_localBaseDir
             << "servers=" << m_servers.size()
             << "categories=" << m_categories.size()
-            << "bookmarks=" << m_bookmarks.size();
+            << "bookmarks=" << m_bookmarks.size()
+            << "warnings=" << m_warnings.size();
 
     emit configChanged();
-    return true;
 }
 
 // ---------------------------------------------------------------------------

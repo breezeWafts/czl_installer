@@ -2,11 +2,13 @@ main.o
 MainWindow.o
 BookmarkManager.o
 ConfigManager.o
+DbSource.o
 DownloadManager.o
 FileOperationManager.o
 InstallManager.o
 InstallWorker.o
 Logger.o
+PgConfig.o
 ProcessManager.o
 TIHelperWrapper.o
 InstallItemModel.o

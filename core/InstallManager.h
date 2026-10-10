@@ -44,8 +44,23 @@ public:
 public slots:
     /// 开始安装（立即返回）。已在安装中时忽略并给出提示。
     void installItem(const QString &itemId);
-    /// 切换 config_ftp.json / config_http.json（"ftp" | "http"）。
-    void setServerType(const QString &type);
+
+    /**
+     * @brief 切换配置来源。
+     *
+     * @param source ConfigManager::ConfigSource::JsonFile（模式一：JSON + FTP）
+     *               或 ConfigManager::ConfigSource::PostgreSQL（模式二：PG + HTTP）
+     * @return 切换并成功加载返回 true；失败返回 false 并保留原配置。
+     */
+    bool setConfigSource(ConfigManager::ConfigSource source);
+
+    /// 兼容旧调用：按字符串切换（"json" / "ftp" / "pg" / "postgresql" / "pgsql"）。
+    bool setServerType(const QString &type);
+
+    /// 按当前来源重新加载（Web 端改完配置后点「刷新配置」用）。
+    bool reloadConfig();
+
+    ConfigManager::ConfigSource currentSource() const;
 
 signals:
     void installStarted(const QString &itemId);
@@ -55,9 +70,11 @@ signals:
     void activeServerChanged();
     void busyChanged(bool busy);
 
+    /// 配置来源切换/重新加载后发出，供主窗口给出中文提示。
+    void sourceChanged(const QString &description, bool ok, const QString &message);
+
 private:
     void cleanupWorker();
-    static QString configFileForType(const QString &type);
 
     ConfigManager   *m_config = nullptr;
     DownloadManager *m_downloadManager = nullptr;
@@ -65,7 +82,6 @@ private:
     QThread       *m_thread = nullptr;
     InstallWorker *m_worker = nullptr;
     QString        m_currentItemId;
-    QString        m_currentServerType = QStringLiteral("ftp");
 };
 
 #endif // INSTALLMANAGER_H

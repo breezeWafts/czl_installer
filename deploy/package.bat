@@ -64,9 +64,38 @@ rem pure Widgets + Network: no QML deployment needed
     --compiler-runtime ^
     "%DEPLOY_DIR%\czl_installer.exe" || exit /b 1
 
-echo [4/4] copying config
+echo [4/6] copying config
 if not exist "%DEPLOY_DIR%\config" mkdir "%DEPLOY_DIR%\config"
 xcopy /Y /I /E "%ROOT%\config" "%DEPLOY_DIR%\config\" >nul || exit /b 1
+
+echo [5/6] deploying PostgreSQL support (mode 2: --pg)
+rem  Qt6Sql.dll comes with windeployqt; the QPSQL driver plugin and libpq do not.
+if exist "%QT_DIR%\plugins\sqldrivers\qsqlpsql.dll" (
+    if not exist "%DEPLOY_DIR%\sqldrivers" mkdir "%DEPLOY_DIR%\sqldrivers"
+    copy /Y "%QT_DIR%\plugins\sqldrivers\qsqlpsql.dll" "%DEPLOY_DIR%\sqldrivers\" >nul
+    echo        sqldrivers\qsqlpsql.dll
+) else (
+    echo        [WARN] qsqlpsql.dll not found under "%QT_DIR%" - --pg will fail.
+)
+
+if "%PGSQL_DIR%"=="" (
+    if exist "C:\Program Files\PostgreSQL\18\bin\libpq.dll" set "PGSQL_DIR=C:\Program Files\PostgreSQL\18\bin"
+)
+if "%PGSQL_DIR%"=="" (
+    if exist "C:\Program Files\PostgreSQL\17\bin\libpq.dll" set "PGSQL_DIR=C:\Program Files\PostgreSQL\17\bin"
+)
+if "%PGSQL_DIR%"=="" (
+    if exist "C:\Program Files\PostgreSQL\16\bin\libpq.dll" set "PGSQL_DIR=C:\Program Files\PostgreSQL\16\bin"
+)
+if not "%PGSQL_DIR%"=="" (
+    for %%L in (libpq.dll libssl-3-x64.dll libcrypto-3-x64.dll libintl-9.dll libiconv-2.dll) do (
+        if exist "%PGSQL_DIR%\%%L" copy /Y "%PGSQL_DIR%\%%L" "%DEPLOY_DIR%\" >nul
+    )
+) else (
+    echo        [WARN] libpq.dll not found - set PGSQL_DIR to the PostgreSQL bin dir.
+)
+
+echo [6/6] done
 
 echo.
 echo packaged: %DEPLOY_DIR%

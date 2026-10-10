@@ -53,6 +53,9 @@ public:
 
 private slots:
     void onServerTypeChanged(int index);
+    void onReloadConfigClicked();
+    /// 配置来源切换/重新加载的结果（来自 InstallManager::sourceChanged）。
+    void onSourceChanged(const QString &description, bool ok, const QString &message);
     void onTreeCurrentChanged(const QModelIndex &current,
                               const QModelIndex &previous);
     void onInstallProgress(const QString &itemId, int percent,
@@ -76,6 +79,8 @@ private:
 
     /// 依据模型内容重建列表（切换类别/服务器时调用）。
     void rebuildItemList();
+    /// 配置来源切换/重新加载成功后同步界面（树、列表、缓存目录、服务器胶囊）。
+    void refreshAfterConfigReload();
     /// 只刷新单个条目的状态（安装进度/结果时调用，不重建列表）。
     void refreshItemRow(const QString &itemId);
     /// 创建一个卡片行；同时把相关控件登记进 m_rowWidgets。
@@ -93,6 +98,7 @@ private:
 
     // ---------- UI ----------
     QComboBox   *m_serverTypeCombo   = nullptr;
+    QPushButton *m_reloadConfigBtn   = nullptr;
     QLabel      *m_activeServerLabel = nullptr;
     QTreeView   *m_treeView          = nullptr;
     QListWidget *m_listWidget        = nullptr;
